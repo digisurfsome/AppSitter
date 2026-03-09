@@ -1,0 +1,1629 @@
+// ==UserScript==
+// @name         AppSitter
+// @namespace    https://github.com/digisurfsome/AppSitter
+// @version      2.0
+// @description  Auto-feeds build phases into AI chat sequentially — watches for completion and advances automatically
+// @author       AppSitter
+// @match        https://claude.ai/*
+// @match        https://chatgpt.com/*
+// @match        https://chat.openai.com/*
+// @match        https://gemini.google.com/*
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // ============================================================
+  // CONSTANTS
+  // ============================================================
+
+  var STORAGE = {
+    phases: 'pb-phases',
+    currentPhase: 'pb-current-phase',
+    repoUrl: 'pb-repo-url',
+    repoName: 'pb-repo-name',
+    buildName: 'pb-build-name',
+    state: 'pb-state',
+    panelOpen: 'pb-panel-open',
+    autoCommit: 'pb-auto-commit',
+    zoom: 'pb-zoom'
+  };
+
+  var IDLE_THRESHOLD = 5000;
+  var POLL_INTERVAL = 2000;
+  var POST_SEND_DELAY = 3000;
+  var INTER_PHASE_DELAY = 2500;
+  var SEND_RETRY_DELAY = 600;
+  var SEND_MAX_RETRIES = 4;
+  var PHASE_MARKER_RE = /---\s*PHASE\s+(\d+)\s*---/gi;
+
+  var AUTO_COMMIT_MSG = 'All phases are now complete. Please commit all your changes with a clear, descriptive commit message summarizing what was done, then push to your current branch. Use: git add -A && git commit -m "your message" && git push';
+
+  var PHASE_COMMIT_FOOTER = '\n\nIMPORTANT: When you are finished with this task, commit all changes with a clear, descriptive commit message and push to your current branch. Do NOT write a summary or review in the chat after you are done — put your summary inside the commit message instead. Just commit, push, and stop.';
+
+  var REPO_SELECT_TIMEOUT = 500;
+  var REPO_SEARCH_DELAY = 800;
+  var REPO_CLICK_DELAY = 500;
+  var RENAME_DELAY = 30000;
+
+  // ============================================================
+  // STATE
+  // ============================================================
+
+  var phases = [];
+  var currentPhaseIndex = 0;
+  var runnerState = 'idle';
+  var lastMutationTime = 0;
+  var mutationObserver = null;
+  var completionPollTimer = null;
+  var onCompletionCb = null;
+  var panelEl = null;
+  var phaseListEl = null;
+  var logEl = null;
+  var statusTextEl = null;
+  var phaseCountEl = null;
+  var startBtn = null;
+  var pauseBtn = null;
+  var stopBtn = null;
+  var skipBtn = null;
+  var toggleBtn = null;
+  var renameTimer = null;
+  var zoomLevel = 100;
+
+  // ============================================================
+  // SITE DETECTION
+  // ============================================================
+
+  function detectSite() {
+    var host = window.location.hostname;
+    if (host.indexOf('claude.ai') !== -1) return 'claude';
+    if (host.indexOf('chatgpt.com') !== -1 || host.indexOf('chat.openai.com') !== -1) return 'chatgpt';
+    if (host.indexOf('gemini.google.com') !== -1) return 'gemini';
+    return 'unknown';
+  }
+
+  var SITE = detectSite();
+
+  // ============================================================
+  // CHAT INPUT DETECTION & INJECTION
+  // ============================================================
+
+  function getEditor() {
+    var el;
+    el = document.querySelector('.ProseMirror[contenteditable="true"]');
+    if (el) return { el: el, type: 'prosemirror' };
+    el = document.querySelector('div[data-placeholder][contenteditable="true"]');
+    if (el) return { el: el, type: 'prosemirror' };
+    el = document.querySelector('#prompt-textarea');
+    if (el) return { el: el, type: 'prosemirror' };
+    el = document.querySelector('.ql-editor[contenteditable="true"]');
+    if (el) return { el: el, type: 'prosemirror' };
+    el = document.querySelector('div[contenteditable="true"]');
+    if (el) return { el: el, type: 'prosemirror' };
+    el = document.querySelector('textarea');
+    if (el) return { el: el, type: 'textarea' };
+    return null;
+  }
+
+  function injectText(text) {
+    var editor = getEditor();
+    if (!editor) return false;
+    var el = editor.el;
+    var type = editor.type;
+
+    if (type === 'textarea') {
+      var setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype, 'value'
+      ).set;
+      setter.call(el, text);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.focus();
+      return true;
+    }
+
+    el.focus();
+    var sel = window.getSelection();
+    var range = document.createRange();
+    range.selectNodeContents(el);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    var ok = document.execCommand('insertText', false, text);
+    if (!ok) {
+      var cd = new DataTransfer();
+      cd.setData('text/plain', text);
+      el.dispatchEvent(new ClipboardEvent('paste', {
+        clipboardData: cd, bubbles: true, cancelable: true
+      }));
+    }
+    return true;
+  }
+
+  // ============================================================
+  // SEND BUTTON DETECTION & CLICKING
+  // ============================================================
+
+  var SEND_SELECTORS = {
+    claude: [
+      'button[aria-label="Send Message"]',
+      'button[aria-label="Send message"]',
+      'button[aria-label="Send"]',
+      'button[data-testid="send-button"]'
+    ],
+    chatgpt: [
+      'button[data-testid="send-button"]',
+      'button[aria-label="Send prompt"]',
+      'button[aria-label="Send"]'
+    ],
+    gemini: [
+      'button[aria-label="Send message"]',
+      'button.send-button',
+      '.send-button-container button'
+    ]
+  };
+
+  var STOP_SELECTORS = {
+    claude: [
+      'button[aria-label="Stop Response"]',
+      'button[aria-label="Stop response"]',
+      'button[aria-label="Stop"]'
+    ],
+    chatgpt: [
+      'button[aria-label="Stop generating"]',
+      'button[data-testid="stop-button"]',
+      'button[aria-label="Stop"]'
+    ],
+    gemini: [
+      'button[aria-label="Stop"]'
+    ]
+  };
+
+  function findButtonFromMap(selectorMap) {
+    var primary = selectorMap[SITE] || [];
+    var all = primary.slice();
+    var keys = Object.keys(selectorMap);
+    for (var k = 0; k < keys.length; k++) {
+      if (keys[k] !== SITE) {
+        var extras = selectorMap[keys[k]];
+        for (var j = 0; j < extras.length; j++) all.push(extras[j]);
+      }
+    }
+    for (var i = 0; i < all.length; i++) {
+      var btn = document.querySelector(all[i]);
+      if (btn) return btn;
+    }
+    return null;
+  }
+
+  function isSendAvailable() {
+    var btn = findButtonFromMap(SEND_SELECTORS);
+    return btn && !btn.disabled;
+  }
+
+  function isStopVisible() {
+    return !!findButtonFromMap(STOP_SELECTORS);
+  }
+
+  function attemptSend(retries, callback) {
+    var btn = findButtonFromMap(SEND_SELECTORS);
+    if (btn && !btn.disabled) {
+      btn.click();
+      if (callback) callback(true);
+      return;
+    }
+    // Fallback: Enter key
+    var editor = getEditor();
+    if (editor) {
+      editor.el.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+        bubbles: true, cancelable: true
+      }));
+      if (callback) callback(true);
+      return;
+    }
+    if (retries > 0) {
+      setTimeout(function () {
+        attemptSend(retries - 1, callback);
+      }, SEND_RETRY_DELAY);
+    } else {
+      if (callback) callback(false);
+    }
+  }
+
+  // ============================================================
+  // COMPLETION DETECTION
+  // ============================================================
+
+  function getChatContainer() {
+    var selectors = [
+      '[class*="conversation"]',
+      '[class*="chat-messages"]',
+      '[role="presentation"]',
+      'main',
+      '[role="main"]'
+    ];
+    for (var i = 0; i < selectors.length; i++) {
+      var el = document.querySelector(selectors[i]);
+      if (el) return el;
+    }
+    return document.body;
+  }
+
+  function startCompletionDetection(callback) {
+    stopCompletionDetection();
+    onCompletionCb = callback;
+    lastMutationTime = Date.now();
+
+    var container = getChatContainer();
+    mutationObserver = new MutationObserver(function () {
+      lastMutationTime = Date.now();
+    });
+    mutationObserver.observe(container, {
+      childList: true, subtree: true, characterData: true
+    });
+
+    completionPollTimer = setInterval(function () {
+      var idle = Date.now() - lastMutationTime;
+      var sendOk = isSendAvailable();
+      var stopUp = isStopVisible();
+      if (idle >= IDLE_THRESHOLD && sendOk && !stopUp) {
+        stopCompletionDetection();
+        if (onCompletionCb) onCompletionCb();
+      }
+    }, POLL_INTERVAL);
+  }
+
+  function stopCompletionDetection() {
+    if (mutationObserver) {
+      mutationObserver.disconnect();
+      mutationObserver = null;
+    }
+    if (completionPollTimer) {
+      clearInterval(completionPollTimer);
+      completionPollTimer = null;
+    }
+  }
+
+  // ============================================================
+  // PERSISTENCE
+  // ============================================================
+
+  function loadState() {
+    try {
+      var p = localStorage.getItem(STORAGE.phases);
+      if (p) phases = JSON.parse(p);
+      var c = localStorage.getItem(STORAGE.currentPhase);
+      if (c !== null) currentPhaseIndex = parseInt(c, 10);
+      var s = localStorage.getItem(STORAGE.state);
+      if (s && s !== 'running') runnerState = s;
+      if (s === 'running') runnerState = 'paused';
+    } catch (_) {}
+  }
+
+  function saveState() {
+    localStorage.setItem(STORAGE.phases, JSON.stringify(phases));
+    localStorage.setItem(STORAGE.currentPhase, String(currentPhaseIndex));
+    localStorage.setItem(STORAGE.state, runnerState);
+  }
+
+  function getRepoUrl() {
+    return localStorage.getItem(STORAGE.repoUrl) || '';
+  }
+
+  function saveRepoUrl(url) {
+    localStorage.setItem(STORAGE.repoUrl, url);
+  }
+
+  function getAutoCommit() {
+    return localStorage.getItem(STORAGE.autoCommit) === 'true';
+  }
+
+  function saveAutoCommit(val) {
+    localStorage.setItem(STORAGE.autoCommit, val ? 'true' : 'false');
+  }
+
+  function getRepoName() {
+    return localStorage.getItem(STORAGE.repoName) || '';
+  }
+
+  function saveRepoName(name) {
+    localStorage.setItem(STORAGE.repoName, name);
+  }
+
+  function getBuildName() {
+    return localStorage.getItem(STORAGE.buildName) || '';
+  }
+
+  function saveBuildName(name) {
+    localStorage.setItem(STORAGE.buildName, name);
+  }
+
+  function getZoom() {
+    var z = parseInt(localStorage.getItem(STORAGE.zoom), 10);
+    return (z && z >= 30 && z <= 300) ? z : 100;
+  }
+
+  function saveZoom(val) {
+    localStorage.setItem(STORAGE.zoom, String(val));
+  }
+
+  function extractRepoName(url) {
+    if (!url) return '';
+    var match = url.match(/github\.com\/[^\/]+\/([^\/\s\?#]+)/i);
+    if (match) return match[1].replace(/\.git$/, '');
+    if (url.indexOf('/') === -1 && url.indexOf('.') === -1) return url.trim();
+    return '';
+  }
+
+  // ============================================================
+  // PHASE PARSING & VARIABLES
+  // ============================================================
+
+  function parsePhases(rawText) {
+    PHASE_MARKER_RE.lastIndex = 0;
+    var markers = [];
+    var match;
+    while ((match = PHASE_MARKER_RE.exec(rawText)) !== null) {
+      markers.push({ index: match.index, end: match.index + match[0].length, num: parseInt(match[1], 10) });
+    }
+
+    if (markers.length === 0) {
+      var trimmed = rawText.trim();
+      if (trimmed) return [{ number: 1, content: trimmed, status: 'pending' }];
+      return [];
+    }
+
+    var result = [];
+    for (var i = 0; i < markers.length; i++) {
+      var start = markers[i].end;
+      var end = (i + 1 < markers.length) ? markers[i + 1].index : rawText.length;
+      var content = rawText.substring(start, end).trim();
+      if (content) {
+        result.push({ number: markers[i].num, content: content, status: 'pending' });
+      }
+    }
+    return result;
+  }
+
+  function substituteVars(text) {
+    var repoUrl = getRepoUrl();
+    var repoName = getRepoName();
+    var buildName = getBuildName();
+    return text
+      .replace(/\{\{REPO_URL\}\}/gi, repoUrl)
+      .replace(/\{\{REPO_NAME\}\}/gi, repoName)
+      .replace(/\{\{BUILD_NAME\}\}/gi, buildName)
+      .replace(/\{\{PHASE_NUMBER\}\}/gi, String(currentPhaseIndex + 1))
+      .replace(/\{\{TOTAL_PHASES\}\}/gi, String(phases.length));
+  }
+
+  function wrapPhaseContent(text, phaseIdx) {
+    var wrapped = '';
+    var repoName = getRepoName();
+    var buildName = getBuildName();
+
+    // First phase: prepend build title for auto-naming the conversation
+    if (phaseIdx === 0 && (buildName || repoName)) {
+      var title = buildName || ('Phase Build - ' + repoName);
+      wrapped += '# ' + title + '\n\n';
+    }
+
+    wrapped += text;
+
+    // Append commit + no-summary instruction
+    if (getAutoCommit()) {
+      wrapped += PHASE_COMMIT_FOOTER;
+    }
+
+    return wrapped;
+  }
+
+  // ============================================================
+  // REPO DROPDOWN SELECTION (Claude Code Web)
+  // ============================================================
+
+  function selectRepoInDropdown(repoName, callback) {
+    if (!repoName) {
+      addLog('No repo name set. Skipping repo selection.');
+      if (callback) callback();
+      return;
+    }
+    if (SITE !== 'claude') {
+      addLog('Repo selection only available on Claude. Skipping.');
+      if (callback) callback();
+      return;
+    }
+
+    addLog('Selecting repo: ' + repoName + '...');
+
+    // Step 1: Find the repo selector button in the top-left area
+    // Claude Code Web shows the repo name in a clickable button near the top-left
+    var repoBtn = null;
+
+    // Try specific selectors first
+    var btnSelectors = [
+      'button[data-testid="repo-selector"]',
+      'button[aria-label*="repo" i]',
+      'button[aria-label*="repository" i]',
+      '[class*="repo-selector"] button',
+      '[class*="repoSelector"] button'
+    ];
+
+    for (var s = 0; s < btnSelectors.length; s++) {
+      repoBtn = document.querySelector(btnSelectors[s]);
+      if (repoBtn) break;
+    }
+
+    // Fallback: look for buttons in the top-left area (rect.left < 300, rect.top < 80)
+    // that contain short text (likely a repo name like "Ap..." or "AppSitter")
+    if (!repoBtn) {
+      var allBtns = document.querySelectorAll('button, [role="button"]');
+      for (var i = 0; i < allBtns.length; i++) {
+        var el = allBtns[i];
+        var rect = el.getBoundingClientRect();
+        if (rect.left < 300 && rect.top < 80 && rect.width > 20 && rect.height > 10) {
+          var text = el.textContent.trim();
+          // Skip known non-repo buttons
+          if (text && text.length > 0 && text.length < 40 &&
+              !text.match(/^(Auto|Send|Stop|Pause|Start|Skip|Save|Edit|Delete|Archive|Rename|Share|New|PB|Settings|Help|Search|\+)/i) &&
+              !el.closest('#pb-panel') && !el.closest('#pb-toggle')) {
+            repoBtn = el;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!repoBtn) {
+      addLog('WARNING: Could not find repo selector button. Skipping.');
+      if (callback) callback();
+      return;
+    }
+
+    repoBtn.click();
+    addLog('Clicked repo dropdown.');
+
+    // Step 2: Wait for dropdown to open, find the search input
+    setTimeout(function () {
+      var searchInput = null;
+
+      // Look for visible search/filter inputs that appeared in the dropdown area
+      var inputs = document.querySelectorAll(
+        'input[type="text"], input[type="search"], input:not([type]), ' +
+        'input[placeholder*="search" i], input[placeholder*="repo" i], input[placeholder*="filter" i]'
+      );
+
+      for (var i = 0; i < inputs.length; i++) {
+        var inp = inputs[i];
+        var rect = inp.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && rect.left < 400 && rect.top < 300) {
+          // Make sure it's not our own panel's input
+          if (!inp.closest('#pb-panel')) {
+            searchInput = inp;
+            break;
+          }
+        }
+      }
+
+      // Fallback: find input inside any popover/dropdown/dialog that appeared
+      if (!searchInput) {
+        var containers = document.querySelectorAll(
+          '[role="listbox"], [role="dialog"], [role="menu"], ' +
+          '[class*="dropdown"], [class*="popover"], [class*="popup"], [class*="modal"]'
+        );
+        for (var c = 0; c < containers.length; c++) {
+          var inp2 = containers[c].querySelector('input');
+          if (inp2 && !inp2.closest('#pb-panel')) {
+            searchInput = inp2;
+            break;
+          }
+        }
+      }
+
+      if (!searchInput) {
+        addLog('WARNING: Could not find repo search input. Skipping.');
+        document.body.click();
+        if (callback) callback();
+        return;
+      }
+
+      // Step 3: Type the repo name into the search box
+      searchInput.focus();
+      var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      nativeSetter.call(searchInput, repoName);
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+      addLog('Typed repo name: ' + repoName);
+
+      // Step 4: Wait for filtering, then click the matching result
+      setTimeout(function () {
+        var found = false;
+        var lowerName = repoName.toLowerCase();
+
+        // Look for matching items in dropdown results
+        var itemSelectors = [
+          '[role="option"]',
+          '[role="menuitem"]',
+          '[class*="dropdown"] li',
+          '[class*="dropdown"] [class*="item"]',
+          '[class*="popover"] li',
+          '[class*="popover"] [class*="item"]',
+          '[class*="list"] [class*="item"]'
+        ];
+
+        for (var s = 0; s < itemSelectors.length; s++) {
+          var items = document.querySelectorAll(itemSelectors[s]);
+          for (var i = 0; i < items.length; i++) {
+            var itemText = items[i].textContent.trim().toLowerCase();
+            if (itemText.indexOf(lowerName) !== -1 && !items[i].closest('#pb-panel')) {
+              items[i].click();
+              addLog('Selected repo: ' + repoName);
+              found = true;
+              break;
+            }
+          }
+          if (found) break;
+        }
+
+        // Broader fallback: any clickable element in dropdown area matching the name
+        if (!found) {
+          var clickables = document.querySelectorAll('a, button, [role="button"], div[tabindex], li, span[tabindex]');
+          for (var j = 0; j < clickables.length; j++) {
+            var cel = clickables[j];
+            var crect = cel.getBoundingClientRect();
+            if (crect.left < 400 && crect.top > 40 && crect.top < 400 && crect.width > 0) {
+              var celText = cel.textContent.trim().toLowerCase();
+              if (celText.indexOf(lowerName) !== -1 && celText.length < 100 && !cel.closest('#pb-panel')) {
+                cel.click();
+                addLog('Selected repo: ' + repoName);
+                found = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (!found) {
+          addLog('WARNING: Could not find "' + repoName + '" in dropdown. Closing.');
+          document.body.click();
+        }
+
+        setTimeout(function () {
+          if (callback) callback();
+        }, REPO_CLICK_DELAY);
+      }, REPO_SEARCH_DELAY);
+    }, REPO_SELECT_TIMEOUT);
+  }
+
+  // ============================================================
+  // CONVERSATION RENAME (Claude Code Web)
+  // ============================================================
+
+  function renameConversation(name) {
+    if (!name || SITE !== 'claude') return;
+    addLog('Attempting to rename conversation: ' + name + '...');
+
+    // Step 1: Find the conversation title/dropdown button at top-center
+    var titleBtn = null;
+    var selectors = [
+      '[class*="conversation"] button',
+      'header [class*="title"]',
+      'button[class*="title"]'
+    ];
+    for (var s = 0; s < selectors.length; s++) {
+      titleBtn = document.querySelector(selectors[s]);
+      if (titleBtn && !titleBtn.closest('#pb-panel')) break;
+      titleBtn = null;
+    }
+
+    // Fallback: look for a clickable element at top-center with a dropdown arrow
+    if (!titleBtn) {
+      var candidates = document.querySelectorAll('button, [role="button"], span[class*="title"]');
+      for (var i = 0; i < candidates.length; i++) {
+        var el = candidates[i];
+        var rect = el.getBoundingClientRect();
+        // Top center area
+        if (rect.top < 60 && rect.left > 200 && rect.right < (window.innerWidth - 200) && rect.width > 50) {
+          if (!el.closest('#pb-panel')) {
+            titleBtn = el;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!titleBtn) {
+      addLog('WARNING: Could not find conversation title button. Skipping rename.');
+      return;
+    }
+
+    titleBtn.click();
+    addLog('Clicked conversation title dropdown.');
+
+    // Step 2: Wait for dropdown menu, click Rename
+    setTimeout(function () {
+      var renameBtn = null;
+      var menuItems = document.querySelectorAll('[role="menuitem"], [role="option"], button, a');
+      for (var i = 0; i < menuItems.length; i++) {
+        var itemText = menuItems[i].textContent.trim().toLowerCase();
+        if (itemText === 'rename' && !menuItems[i].closest('#pb-panel')) {
+          renameBtn = menuItems[i];
+          break;
+        }
+      }
+
+      if (!renameBtn) {
+        addLog('WARNING: Could not find Rename option. Closing menu.');
+        document.body.click();
+        return;
+      }
+
+      renameBtn.click();
+      addLog('Clicked Rename.');
+
+      // Step 3: Wait for editable title field, type the name
+      setTimeout(function () {
+        // Look for an editable input that appeared in the title area
+        var editableInput = null;
+        var inputs = document.querySelectorAll('input[type="text"], input:not([type]), [contenteditable="true"]');
+        for (var i = 0; i < inputs.length; i++) {
+          var inp = inputs[i];
+          var rect = inp.getBoundingClientRect();
+          if (rect.top < 60 && rect.left > 100 && rect.width > 50 && !inp.closest('#pb-panel')) {
+            editableInput = inp;
+            break;
+          }
+        }
+
+        if (!editableInput) {
+          addLog('WARNING: Could not find editable title field. Skipping.');
+          return;
+        }
+
+        editableInput.focus();
+        if (editableInput.tagName === 'INPUT') {
+          var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          nativeSetter.call(editableInput, name);
+          editableInput.dispatchEvent(new Event('input', { bubbles: true }));
+          editableInput.dispatchEvent(new Event('change', { bubbles: true }));
+        } else {
+          // contenteditable
+          var sel = window.getSelection();
+          var range = document.createRange();
+          range.selectNodeContents(editableInput);
+          sel.removeAllRanges();
+          sel.addRange(range);
+          document.execCommand('insertText', false, name);
+        }
+
+        // Click outside to save
+        setTimeout(function () {
+          editableInput.blur();
+          document.body.click();
+          addLog('Conversation renamed to: ' + name);
+        }, 300);
+      }, 500);
+    }, 500);
+  }
+
+  // ============================================================
+  // PHASE RUNNER
+  // ============================================================
+
+  function sendAutoCommit() {
+    addLog('Auto-commit enabled. Sending commit instruction...');
+    var repoUrl = getRepoUrl();
+    var commitText = AUTO_COMMIT_MSG;
+    if (repoUrl) {
+      commitText += '\n\nRepository: ' + repoUrl;
+    }
+    var injected = injectText(commitText);
+    if (!injected) {
+      addLog('ERROR: Could not inject commit message. No chat input found.');
+      return;
+    }
+    setTimeout(function () {
+      attemptSend(SEND_MAX_RETRIES, function (sent) {
+        if (sent) {
+          addLog('Commit instruction sent successfully.');
+        } else {
+          addLog('WARNING: Could not auto-send commit instruction. Please click Send manually.');
+        }
+      });
+    }, 500);
+  }
+
+  function runCurrentPhase() {
+    if (currentPhaseIndex >= phases.length) {
+      runnerState = 'complete';
+      saveState();
+      refreshUI();
+      addLog('All phases complete!');
+      if (getAutoCommit()) {
+        setTimeout(function () { sendAutoCommit(); }, INTER_PHASE_DELAY);
+      }
+      return;
+    }
+    if (runnerState !== 'running') return;
+
+    var phase = phases[currentPhaseIndex];
+    phase.status = 'running';
+    saveState();
+    refreshUI();
+
+    // Step 1: Auto-select repo in dropdown (always on when repo name is set)
+    var repoName = getRepoName();
+    var shouldSelectRepo = repoName && SITE === 'claude';
+
+    function injectAndSend() {
+      addLog('Injecting Phase ' + phase.number + '...');
+
+      var text = substituteVars(phase.content);
+      text = wrapPhaseContent(text, currentPhaseIndex);
+      var injected = injectText(text);
+      if (!injected) {
+        addLog('ERROR: No chat input found. Pausing.');
+        runnerState = 'paused';
+        saveState();
+        refreshUI();
+        return;
+      }
+
+      addLog('Text injected. Attempting to send...');
+
+      setTimeout(function () {
+        if (runnerState !== 'running') return;
+
+        attemptSend(SEND_MAX_RETRIES, function (sent) {
+          if (!sent) {
+            addLog('WARNING: Could not auto-send. Please click Send manually. Babysitter will still watch for completion.');
+          } else {
+            addLog('Phase ' + phase.number + ' sent. Watching for completion...');
+          }
+
+          setTimeout(function () {
+            if (runnerState !== 'running') return;
+
+            startCompletionDetection(function () {
+              phase.status = 'complete';
+              addLog('Phase ' + phase.number + ' complete!');
+              currentPhaseIndex++;
+              saveState();
+              refreshUI();
+
+              setTimeout(function () {
+                if (runnerState === 'running') runCurrentPhase();
+              }, INTER_PHASE_DELAY);
+            });
+          }, POST_SEND_DELAY);
+        });
+      }, 500);
+    }
+
+    if (shouldSelectRepo) {
+      selectRepoInDropdown(repoName, function () {
+        if (runnerState !== 'running') return;
+        injectAndSend();
+      });
+    } else {
+      injectAndSend();
+    }
+  }
+
+  // ============================================================
+  // LOGGING
+  // ============================================================
+
+  function addLog(msg) {
+    if (!logEl) return;
+    var entry = document.createElement('div');
+    entry.style.cssText = 'font-size:11px;color:#bbb;padding:3px 0;border-bottom:1px solid #2a2a28;word-wrap:break-word;';
+    var time = new Date().toLocaleTimeString();
+    entry.textContent = '[' + time + '] ' + msg;
+    logEl.insertBefore(entry, logEl.firstChild);
+    while (logEl.children.length > 50) logEl.removeChild(logEl.lastChild);
+  }
+
+  // ============================================================
+  // STYLES
+  // ============================================================
+
+  function injectStyles() {
+    var style = document.createElement('style');
+    style.textContent = [
+      '#pb-toggle {',
+      '  position:fixed;bottom:20px;right:20px;z-index:99998;',
+      '  width:44px;height:44px;border-radius:50%;',
+      '  background:#da7757;color:#fff;border:2px solid #c4664a;',
+      '  cursor:pointer;font-size:14px;font-weight:700;',
+      '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;',
+      '  display:flex;align-items:center;justify-content:center;',
+      '  box-shadow:0 2px 8px rgba(0,0,0,0.4);transition:all 0.2s;',
+      '}',
+      '#pb-toggle:hover { transform:scale(1.1);background:#c4664a; }',
+      '',
+      '#pb-panel {',
+      '  position:fixed;top:50%;right:16px;',
+      '  width:320px;max-height:90vh;z-index:99999;',
+      '  background:#1e1e1c;border:1px solid #444;border-radius:10px;',
+      '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;',
+      '  display:flex;flex-direction:column;overflow:hidden;',
+      '  box-shadow:0 4px 20px rgba(0,0,0,0.5);',
+      '  transform-origin:top right;',
+      '}',
+      '#pb-panel.pb-hidden { display:none; }',
+      '',
+      '/* Zoom header: big [-] | number | [+] */',
+      '.pb-zoom-bar {',
+      '  display:flex;align-items:stretch;',
+      '  background:#262624;border-bottom:1px solid #444;',
+      '  flex-shrink:0;min-height:36px;',
+      '}',
+      '.pb-zoom-btn {',
+      '  flex:1;background:none;border:none;color:#fff;',
+      '  cursor:pointer;font-size:20px;font-weight:700;',
+      '  transition:background 0.15s;display:flex;',
+      '  align-items:center;justify-content:center;',
+      '}',
+      '.pb-zoom-btn:hover { background:#333; }',
+      '.pb-zoom-btn:active { background:#da7757; }',
+      '.pb-zoom-input {',
+      '  flex:1;background:#1e1e1c;color:#fff;border:none;',
+      '  border-left:1px solid #444;border-right:1px solid #444;',
+      '  text-align:center;font-size:13px;font-weight:600;',
+      '  font-family:inherit;outline:none;min-width:0;',
+      '}',
+      '.pb-zoom-input:focus { background:#2a2a28; }',
+      '',
+      '/* Status bar: left=Idle+count, center=AppSitter, right=claude+minimize */',
+      '.pb-status-bar {',
+      '  display:flex;align-items:center;justify-content:space-between;',
+      '  padding:8px 14px;background:#232321;border-bottom:1px solid #333;',
+      '  flex-shrink:0;',
+      '}',
+      '.pb-status-left {',
+      '  display:flex;align-items:center;gap:6px;',
+      '}',
+      '.pb-status-text { color:#fff;font-size:12px;font-weight:600; }',
+      '.pb-phase-count { color:#fff;font-size:12px;font-weight:600; }',
+      '.pb-status-center {',
+      '  color:#da7757;font-size:14px;font-weight:700;',
+      '  text-align:center;flex:1;',
+      '}',
+      '.pb-status-right {',
+      '  display:flex;align-items:center;gap:6px;',
+      '}',
+      '.pb-site-label {',
+      '  color:#fff;font-size:12px;font-weight:600;',
+      '}',
+      '.pb-hdr-btn {',
+      '  background:none;border:none;color:#fff;cursor:pointer;',
+      '  font-size:18px;font-weight:700;padding:0 2px;line-height:1;transition:color 0.15s;',
+      '}',
+      '.pb-hdr-btn:hover { color:#da7757; }',
+      '',
+      '.pb-body {',
+      '  flex:1;overflow-y:auto;padding:0;',
+      '}',
+      '',
+      '.pb-section {',
+      '  padding:10px 14px;border-bottom:1px solid #333;',
+      '}',
+      '.pb-section-title {',
+      '  color:#aaa;font-size:10px;font-weight:600;text-transform:uppercase;',
+      '  letter-spacing:0.5px;margin-bottom:6px;',
+      '}',
+      '',
+      '.pb-input {',
+      '  width:100%;background:#262624;color:#e0e0e0;',
+      '  border:1px solid #444;border-radius:5px;padding:7px 10px;',
+      '  font-size:12px;font-family:inherit;outline:none;box-sizing:border-box;',
+      '}',
+      '.pb-input:focus { border-color:#da7757; }',
+      '',
+      '.pb-textarea {',
+      '  width:100%;min-height:100px;background:#262624;color:#e0e0e0;',
+      '  border:1px solid #444;border-radius:5px;padding:8px 10px;',
+      '  font-size:11px;font-family:"SF Mono","Fira Code",Consolas,monospace;',
+      '  line-height:1.4;resize:vertical;outline:none;box-sizing:border-box;',
+      '}',
+      '.pb-textarea:focus { border-color:#da7757; }',
+      '',
+      '.pb-btn {',
+      '  padding:6px 12px;border:1px solid #555;border-radius:5px;',
+      '  background:#262624;color:#e0e0e0;font-size:11px;font-weight:600;',
+      '  cursor:pointer;transition:all 0.15s;font-family:inherit;',
+      '}',
+      '.pb-btn:hover { border-color:#da7757;color:#da7757; }',
+      '.pb-btn:disabled { opacity:0.4;cursor:not-allowed; }',
+      '.pb-btn:disabled:hover { border-color:#555;color:#e0e0e0; }',
+      '',
+      '.pb-btn-primary {',
+      '  background:#da7757;border-color:#da7757;color:#fff;',
+      '}',
+      '.pb-btn-primary:hover { background:#c4664a;border-color:#c4664a;color:#fff; }',
+      '.pb-btn-primary:disabled { background:#555;border-color:#555;color:#999; }',
+      '.pb-btn-primary:disabled:hover { background:#555;border-color:#555;color:#999; }',
+      '',
+      '.pb-btn-danger {',
+      '  border-color:#ff4444;color:#ff4444;',
+      '}',
+      '.pb-btn-danger:hover { background:#ff4444;color:#fff; }',
+      '',
+      '.pb-btn-row {',
+      '  display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;',
+      '}',
+      '',
+      '.pb-hint {',
+      '  color:#888;font-size:10px;margin-top:4px;line-height:1.4;',
+      '}',
+      '',
+      '.pb-github-info {',
+      '  color:#777;font-size:10px;line-height:1.5;margin-bottom:8px;',
+      '  padding:6px 8px;background:#232321;border-radius:4px;border-left:2px solid #da7757;',
+      '  display:none;',
+      '}',
+      '.pb-github-info.pb-expanded { display:block; }',
+      '',
+      '.pb-readmore {',
+      '  color:#da7757;font-size:10px;cursor:pointer;margin-bottom:6px;',
+      '  display:inline-block;',
+      '}',
+      '.pb-readmore:hover { text-decoration:underline; }',
+      '',
+      '.pb-phase-list { list-style:none;margin:0;padding:0; }',
+      '.pb-phase-item {',
+      '  padding:6px 0;border-bottom:1px solid #2a2a28;cursor:pointer;',
+      '  transition:background 0.1s;',
+      '}',
+      '.pb-phase-item:last-child { border-bottom:none; }',
+      '.pb-phase-item:hover { background:#262624; }',
+      '.pb-phase-row {',
+      '  display:flex;align-items:center;gap:8px;',
+      '}',
+      '.pb-phase-icon {',
+      '  width:18px;height:18px;border-radius:50%;display:flex;',
+      '  align-items:center;justify-content:center;font-size:10px;',
+      '  flex-shrink:0;font-weight:700;',
+      '}',
+      '.pb-phase-icon-pending { background:#333;color:#777; }',
+      '.pb-phase-icon-running { background:#da7757;color:#fff;animation:pb-pulse 1.5s infinite; }',
+      '.pb-phase-icon-complete { background:#4caf50;color:#fff; }',
+      '.pb-phase-label { flex:1;color:#e0e0e0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }',
+      '.pb-phase-edit-btn {',
+      '  background:none;border:none;color:#666;cursor:pointer;font-size:10px;',
+      '  padding:2px 4px;transition:color 0.15s;flex-shrink:0;',
+      '}',
+      '.pb-phase-edit-btn:hover { color:#da7757; }',
+      '.pb-phase-content {',
+      '  margin-top:6px;padding:6px 0 0 26px;display:none;',
+      '}',
+      '.pb-phase-content.pb-expanded { display:block; }',
+      '',
+      '.pb-controls {',
+      '  display:flex;gap:6px;padding:10px 14px;border-top:1px solid #333;',
+      '  background:#232321;flex-shrink:0;flex-wrap:wrap;',
+      '}',
+      '',
+      '.pb-log {',
+      '  max-height:120px;overflow-y:auto;padding:8px 14px;',
+      '  border-top:1px solid #333;flex-shrink:0;',
+      '}',
+      '',
+      '@keyframes pb-pulse {',
+      '  0%,100% { opacity:1; }',
+      '  50% { opacity:0.5; }',
+      '}',
+      '',
+      '.pb-repo-row { display:flex;gap:6px;align-items:center; }',
+      '.pb-repo-row .pb-input { flex:1; }'
+    ].join('\n');
+    document.head.appendChild(style);
+  }
+
+  // ============================================================
+  // UI BUILDING
+  // ============================================================
+
+  function applyZoom() {
+    if (!panelEl) return;
+    panelEl.style.transform = 'translateY(-50%) scale(' + (zoomLevel / 100) + ')';
+  }
+
+  function buildUI() {
+    zoomLevel = getZoom();
+
+    // Floating toggle button
+    toggleBtn = document.createElement('button');
+    toggleBtn.id = 'pb-toggle';
+    toggleBtn.textContent = 'AS';
+    toggleBtn.title = 'Toggle AppSitter';
+    document.body.appendChild(toggleBtn);
+
+    // Main panel
+    panelEl = document.createElement('div');
+    panelEl.id = 'pb-panel';
+    var savedOpen = localStorage.getItem(STORAGE.panelOpen);
+    if (savedOpen === 'false') panelEl.classList.add('pb-hidden');
+
+    // -- Zoom bar: big [-] | number input | [+] --
+    var zoomBar = document.createElement('div');
+    zoomBar.className = 'pb-zoom-bar';
+
+    var zoomMinusBtn = document.createElement('button');
+    zoomMinusBtn.className = 'pb-zoom-btn';
+    zoomMinusBtn.textContent = '\u2212';
+    zoomMinusBtn.title = 'Zoom out';
+
+    var zoomInput = document.createElement('input');
+    zoomInput.className = 'pb-zoom-input';
+    zoomInput.type = 'text';
+    zoomInput.value = zoomLevel;
+    zoomInput.title = 'Zoom %';
+
+    var zoomPlusBtn = document.createElement('button');
+    zoomPlusBtn.className = 'pb-zoom-btn';
+    zoomPlusBtn.textContent = '+';
+    zoomPlusBtn.title = 'Zoom in';
+
+    zoomBar.appendChild(zoomMinusBtn);
+    zoomBar.appendChild(zoomInput);
+    zoomBar.appendChild(zoomPlusBtn);
+    panelEl.appendChild(zoomBar);
+
+    // -- Status bar: left=Idle+count, center=AppSitter, right=claude+minimize --
+    var statusBar = document.createElement('div');
+    statusBar.className = 'pb-status-bar';
+
+    var statusLeft = document.createElement('div');
+    statusLeft.className = 'pb-status-left';
+    statusTextEl = document.createElement('span');
+    statusTextEl.className = 'pb-status-text';
+    statusTextEl.textContent = 'Idle';
+    phaseCountEl = document.createElement('span');
+    phaseCountEl.className = 'pb-phase-count';
+    phaseCountEl.textContent = '0/0';
+    statusLeft.appendChild(statusTextEl);
+    statusLeft.appendChild(phaseCountEl);
+
+    var statusCenter = document.createElement('span');
+    statusCenter.className = 'pb-status-center';
+    statusCenter.textContent = 'AppSitter';
+
+    var statusRight = document.createElement('div');
+    statusRight.className = 'pb-status-right';
+    var siteLabel = document.createElement('span');
+    siteLabel.className = 'pb-site-label';
+    siteLabel.textContent = SITE;
+    var minimizeBtn = document.createElement('button');
+    minimizeBtn.className = 'pb-hdr-btn';
+    minimizeBtn.textContent = '\u2013';
+    minimizeBtn.title = 'Minimize';
+    statusRight.appendChild(siteLabel);
+    statusRight.appendChild(minimizeBtn);
+
+    statusBar.appendChild(statusLeft);
+    statusBar.appendChild(statusCenter);
+    statusBar.appendChild(statusRight);
+    panelEl.appendChild(statusBar);
+
+    applyZoom();
+
+    // -- Scrollable body --
+    var body = document.createElement('div');
+    body.className = 'pb-body';
+
+    // Section: GitHub Repo
+    var repoSection = document.createElement('div');
+    repoSection.className = 'pb-section';
+    var repoTitle = document.createElement('div');
+    repoTitle.className = 'pb-section-title';
+    repoTitle.textContent = 'GitHub Repository';
+    repoSection.appendChild(repoTitle);
+
+    var readMoreLink = document.createElement('span');
+    readMoreLink.className = 'pb-readmore';
+    readMoreLink.textContent = 'Read more \u25BC';
+    repoSection.appendChild(readMoreLink);
+
+    var repoInfo = document.createElement('div');
+    repoInfo.className = 'pb-github-info';
+    repoInfo.textContent = "Don't have a repo? GitHub is a free, secure website where everyone stores code \u2014 it's the industry standard. Think Google Drive, but for code. Takes 2 min to set up at github.com.";
+    repoSection.appendChild(repoInfo);
+
+    var repoRow = document.createElement('div');
+    repoRow.className = 'pb-repo-row';
+    var repoInput = document.createElement('input');
+    repoInput.className = 'pb-input';
+    repoInput.type = 'text';
+    repoInput.placeholder = 'https://github.com/you/your-repo';
+    repoInput.value = getRepoUrl();
+    var repoSaveBtn = document.createElement('button');
+    repoSaveBtn.className = 'pb-btn';
+    repoSaveBtn.textContent = 'Save';
+    repoRow.appendChild(repoInput);
+    repoRow.appendChild(repoSaveBtn);
+    repoSection.appendChild(repoRow);
+
+    // Repo Name (read-only display, auto-filled)
+    var repoNameDisplay = document.createElement('div');
+    repoNameDisplay.style.cssText = 'color:#e0e0e0;font-size:11px;margin-top:6px;padding:5px 8px;background:#262624;border-radius:4px;';
+    var currentRepoName = getRepoName();
+    repoNameDisplay.textContent = currentRepoName ? 'Repo: ' + currentRepoName : 'Repo name auto-fills when you save a URL';
+    repoSection.appendChild(repoNameDisplay);
+
+    // Build Name (for conversation title)
+    var buildNameLabel = document.createElement('div');
+    buildNameLabel.className = 'pb-section-title';
+    buildNameLabel.style.marginTop = '10px';
+    buildNameLabel.textContent = 'Build Name (optional)';
+    repoSection.appendChild(buildNameLabel);
+
+    var buildNameRow = document.createElement('div');
+    buildNameRow.className = 'pb-repo-row';
+    var buildNameInput = document.createElement('input');
+    buildNameInput.className = 'pb-input';
+    buildNameInput.type = 'text';
+    buildNameInput.placeholder = 'e.g. Phase Build - AppSitter';
+    buildNameInput.value = getBuildName();
+    var buildNameSaveBtn = document.createElement('button');
+    buildNameSaveBtn.className = 'pb-btn';
+    buildNameSaveBtn.textContent = 'Save';
+    buildNameRow.appendChild(buildNameInput);
+    buildNameRow.appendChild(buildNameSaveBtn);
+    repoSection.appendChild(buildNameRow);
+    var buildNameHint = document.createElement('div');
+    buildNameHint.className = 'pb-hint';
+    buildNameHint.textContent = 'Titles the first phase message. Claude Code Web auto-names the conversation from it.';
+    repoSection.appendChild(buildNameHint);
+
+    // Auto-commit checkbox
+    var commitRow = document.createElement('div');
+    commitRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:8px;border-top:1px solid #333;';
+    var commitCheckbox = document.createElement('input');
+    commitCheckbox.type = 'checkbox';
+    commitCheckbox.id = 'pb-auto-commit';
+    commitCheckbox.checked = getAutoCommit();
+    commitCheckbox.style.cssText = 'accent-color:#da7757;width:14px;height:14px;cursor:pointer;';
+    var commitLabel = document.createElement('label');
+    commitLabel.htmlFor = 'pb-auto-commit';
+    commitLabel.style.cssText = 'color:#e0e0e0;font-size:11px;cursor:pointer;font-weight:600;';
+    commitLabel.textContent = 'Auto-commit when all phases complete';
+    commitRow.appendChild(commitCheckbox);
+    commitRow.appendChild(commitLabel);
+    repoSection.appendChild(commitRow);
+    var commitHint = document.createElement('div');
+    commitHint.className = 'pb-hint';
+    commitHint.textContent = 'When enabled, sends a "commit & push" instruction to the agent after all phases finish.';
+    repoSection.appendChild(commitHint);
+
+    body.appendChild(repoSection);
+
+    // Section: Phase Input
+    var inputSection = document.createElement('div');
+    inputSection.className = 'pb-section';
+    var inputTitle = document.createElement('div');
+    inputTitle.className = 'pb-section-title';
+    inputTitle.textContent = 'Paste Phases';
+    inputSection.appendChild(inputTitle);
+    var inputHint = document.createElement('div');
+    inputHint.className = 'pb-hint';
+    inputHint.style.marginBottom = '6px';
+    inputHint.textContent = 'Separate with --- PHASE 1 ---, --- PHASE 2 ---, etc. Or paste one block for a single phase.';
+    inputSection.appendChild(inputHint);
+    var phaseTextarea = document.createElement('textarea');
+    phaseTextarea.className = 'pb-textarea';
+    phaseTextarea.placeholder = '--- PHASE 1 ---\nYour first phase prompt here...\n\n--- PHASE 2 ---\nYour second phase prompt here...';
+    inputSection.appendChild(phaseTextarea);
+    var inputBtnRow = document.createElement('div');
+    inputBtnRow.className = 'pb-btn-row';
+    var parseBtn = document.createElement('button');
+    parseBtn.className = 'pb-btn pb-btn-primary';
+    parseBtn.textContent = 'Parse Phases';
+    var clearBtn = document.createElement('button');
+    clearBtn.className = 'pb-btn pb-btn-danger';
+    clearBtn.textContent = 'Clear All';
+    inputBtnRow.appendChild(parseBtn);
+    inputBtnRow.appendChild(clearBtn);
+    inputSection.appendChild(inputBtnRow);
+    body.appendChild(inputSection);
+
+    // Section: Phase List
+    var listSection = document.createElement('div');
+    listSection.className = 'pb-section';
+    var listTitle = document.createElement('div');
+    listTitle.className = 'pb-section-title';
+    listTitle.textContent = 'Phases';
+    listSection.appendChild(listTitle);
+    phaseListEl = document.createElement('ul');
+    phaseListEl.className = 'pb-phase-list';
+    listSection.appendChild(phaseListEl);
+    body.appendChild(listSection);
+
+    panelEl.appendChild(body);
+
+    // -- Controls --
+    var controlsDiv = document.createElement('div');
+    controlsDiv.className = 'pb-controls';
+    startBtn = document.createElement('button');
+    startBtn.className = 'pb-btn pb-btn-primary';
+    startBtn.textContent = '\u25B6 Start';
+    pauseBtn = document.createElement('button');
+    pauseBtn.className = 'pb-btn';
+    pauseBtn.textContent = '\u23F8 Pause';
+    stopBtn = document.createElement('button');
+    stopBtn.className = 'pb-btn';
+    stopBtn.textContent = '\u23F9 Stop';
+    skipBtn = document.createElement('button');
+    skipBtn.className = 'pb-btn';
+    skipBtn.textContent = '\u23ED Skip';
+    controlsDiv.appendChild(startBtn);
+    controlsDiv.appendChild(pauseBtn);
+    controlsDiv.appendChild(stopBtn);
+    controlsDiv.appendChild(skipBtn);
+    panelEl.appendChild(controlsDiv);
+
+    // -- Log --
+    logEl = document.createElement('div');
+    logEl.className = 'pb-log';
+    panelEl.appendChild(logEl);
+
+    document.body.appendChild(panelEl);
+
+    // ============================================================
+    // EVENT HANDLERS
+    // ============================================================
+
+    // Zoom handlers
+    zoomMinusBtn.addEventListener('click', function () {
+      zoomLevel = Math.max(30, zoomLevel - 10);
+      zoomInput.value = zoomLevel;
+      saveZoom(zoomLevel);
+      applyZoom();
+    });
+    zoomPlusBtn.addEventListener('click', function () {
+      zoomLevel = Math.min(300, zoomLevel + 10);
+      zoomInput.value = zoomLevel;
+      saveZoom(zoomLevel);
+      applyZoom();
+    });
+    zoomInput.addEventListener('change', function () {
+      var val = parseInt(zoomInput.value, 10);
+      if (val && val >= 30 && val <= 300) {
+        zoomLevel = val;
+        saveZoom(zoomLevel);
+        applyZoom();
+      } else {
+        zoomInput.value = zoomLevel;
+      }
+    });
+    zoomInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') zoomInput.blur();
+    });
+
+    toggleBtn.addEventListener('click', function () {
+      panelEl.classList.toggle('pb-hidden');
+      localStorage.setItem(STORAGE.panelOpen, !panelEl.classList.contains('pb-hidden'));
+    });
+
+    minimizeBtn.addEventListener('click', function () {
+      panelEl.classList.add('pb-hidden');
+      localStorage.setItem(STORAGE.panelOpen, 'false');
+    });
+
+    // Read more toggle
+    readMoreLink.addEventListener('click', function () {
+      var expanded = repoInfo.classList.toggle('pb-expanded');
+      readMoreLink.textContent = expanded ? 'Read less \u25B2' : 'Read more \u25BC';
+    });
+
+    // Repo URL save — also auto-extracts repo name
+    repoSaveBtn.addEventListener('click', function () {
+      var url = repoInput.value.trim();
+      saveRepoUrl(url);
+      var extracted = extractRepoName(url);
+      if (extracted) {
+        saveRepoName(extracted);
+        repoNameDisplay.textContent = 'Repo: ' + extracted;
+        addLog('Repo saved. Name: ' + extracted);
+      } else {
+        addLog('Repo URL saved.');
+      }
+    });
+
+    commitCheckbox.addEventListener('change', function () {
+      saveAutoCommit(commitCheckbox.checked);
+      addLog('Auto-commit ' + (commitCheckbox.checked ? 'enabled' : 'disabled') + '.');
+    });
+
+    // Build Name save
+    buildNameSaveBtn.addEventListener('click', function () {
+      saveBuildName(buildNameInput.value.trim());
+      addLog('Build name saved: ' + buildNameInput.value.trim());
+    });
+
+    parseBtn.addEventListener('click', function () {
+      var raw = phaseTextarea.value;
+      if (!raw.trim()) {
+        addLog('Nothing to parse.');
+        return;
+      }
+      phases = parsePhases(raw);
+      currentPhaseIndex = 0;
+      runnerState = 'idle';
+      saveState();
+      refreshUI();
+      addLog('Parsed ' + phases.length + ' phase(s).');
+      phaseTextarea.value = '';
+    });
+
+    clearBtn.addEventListener('click', function () {
+      if (runnerState === 'running') {
+        addLog('Stop the runner before clearing.');
+        return;
+      }
+      phases = [];
+      currentPhaseIndex = 0;
+      runnerState = 'idle';
+      stopCompletionDetection();
+      saveState();
+      refreshUI();
+      phaseTextarea.value = '';
+      addLog('All phases cleared.');
+    });
+
+    startBtn.addEventListener('click', function () {
+      if (phases.length === 0) {
+        addLog('No phases loaded. Parse phases first.');
+        return;
+      }
+      if (runnerState === 'complete') {
+        currentPhaseIndex = 0;
+        for (var i = 0; i < phases.length; i++) phases[i].status = 'pending';
+      }
+      runnerState = 'running';
+      saveState();
+      refreshUI();
+      addLog('Runner started.');
+
+      // Schedule delayed conversation rename (~30s after start)
+      if (renameTimer) clearTimeout(renameTimer);
+      var buildName = getBuildName();
+      var rName = getRepoName();
+      if (buildName || rName) {
+        renameTimer = setTimeout(function () {
+          renameConversation(buildName || ('Phase Build - ' + rName));
+        }, RENAME_DELAY);
+      }
+
+      runCurrentPhase();
+    });
+
+    pauseBtn.addEventListener('click', function () {
+      if (runnerState !== 'running') return;
+      runnerState = 'paused';
+      stopCompletionDetection();
+      saveState();
+      refreshUI();
+      addLog('Runner paused.');
+    });
+
+    stopBtn.addEventListener('click', function () {
+      runnerState = 'idle';
+      stopCompletionDetection();
+      currentPhaseIndex = 0;
+      for (var i = 0; i < phases.length; i++) phases[i].status = 'pending';
+      saveState();
+      refreshUI();
+      addLog('Runner stopped. Reset to Phase 1.');
+    });
+
+    skipBtn.addEventListener('click', function () {
+      if (phases.length === 0) return;
+      if (currentPhaseIndex < phases.length) {
+        phases[currentPhaseIndex].status = 'complete';
+        addLog('Skipped Phase ' + phases[currentPhaseIndex].number + '.');
+        currentPhaseIndex++;
+      }
+      stopCompletionDetection();
+      saveState();
+      refreshUI();
+      if (runnerState === 'running' && currentPhaseIndex < phases.length) {
+        setTimeout(function () { runCurrentPhase(); }, 500);
+      } else if (currentPhaseIndex >= phases.length) {
+        runnerState = 'complete';
+        saveState();
+        refreshUI();
+        addLog('All phases complete!');
+      }
+    });
+
+    // Initial render
+    refreshUI();
+    if (phases.length > 0) {
+      addLog('Restored ' + phases.length + ' phase(s). State: ' + runnerState + '. Current: Phase ' + (currentPhaseIndex + 1) + '.');
+    }
+  }
+
+  // ============================================================
+  // UI REFRESH
+  // ============================================================
+
+  function refreshUI() {
+    if (!panelEl) return;
+    refreshStatus();
+    refreshPhaseList();
+    refreshControls();
+  }
+
+  function refreshStatus() {
+    if (!statusTextEl) return;
+    var labels = {
+      idle: 'Idle',
+      running: 'Running',
+      paused: 'Paused',
+      complete: 'Complete'
+    };
+    statusTextEl.textContent = labels[runnerState] || runnerState;
+    var colors = {
+      idle: '#fff',
+      running: '#da7757',
+      paused: '#ff9800',
+      complete: '#4caf50'
+    };
+    statusTextEl.style.color = colors[runnerState] || '#fff';
+
+    if (phaseCountEl) {
+      var current = Math.min(currentPhaseIndex + 1, phases.length);
+      if (phases.length === 0) current = 0;
+      phaseCountEl.textContent = current + '/' + phases.length;
+    }
+  }
+
+  function refreshPhaseList() {
+    if (!phaseListEl) return;
+    while (phaseListEl.firstChild) phaseListEl.removeChild(phaseListEl.firstChild);
+
+    if (phases.length === 0) {
+      var empty = document.createElement('li');
+      empty.style.cssText = 'color:#666;font-size:11px;padding:8px 0;text-align:center;';
+      empty.textContent = 'No phases loaded yet.';
+      phaseListEl.appendChild(empty);
+      return;
+    }
+
+    for (var i = 0; i < phases.length; i++) {
+      (function (idx) {
+        var phase = phases[idx];
+        var li = document.createElement('li');
+        li.className = 'pb-phase-item';
+
+        var row = document.createElement('div');
+        row.className = 'pb-phase-row';
+
+        // Status icon
+        var icon = document.createElement('span');
+        icon.className = 'pb-phase-icon';
+        if (phase.status === 'complete') {
+          icon.className += ' pb-phase-icon-complete';
+          icon.textContent = '\u2713';
+        } else if (phase.status === 'running') {
+          icon.className += ' pb-phase-icon-running';
+          icon.textContent = '\u25B6';
+        } else {
+          icon.className += ' pb-phase-icon-pending';
+          icon.textContent = String(phase.number);
+        }
+
+        // Label
+        var label = document.createElement('span');
+        label.className = 'pb-phase-label';
+        var preview = phase.content.substring(0, 60).replace(/\n/g, ' ');
+        if (phase.content.length > 60) preview += '...';
+        label.textContent = 'Phase ' + phase.number + ': ' + preview;
+
+        // Edit button
+        var editBtn = document.createElement('button');
+        editBtn.className = 'pb-phase-edit-btn';
+        editBtn.textContent = '[edit]';
+        editBtn.title = 'Edit this phase';
+
+        // Set-as-current button (only if not running)
+        var setCurBtn = document.createElement('button');
+        setCurBtn.className = 'pb-phase-edit-btn';
+        setCurBtn.textContent = '[start here]';
+        setCurBtn.title = 'Set runner to start from this phase';
+        if (runnerState === 'running') setCurBtn.style.display = 'none';
+
+        row.appendChild(icon);
+        row.appendChild(label);
+        row.appendChild(editBtn);
+        row.appendChild(setCurBtn);
+        li.appendChild(row);
+
+        // Expandable content area
+        var contentDiv = document.createElement('div');
+        contentDiv.className = 'pb-phase-content';
+        var contentTextarea = document.createElement('textarea');
+        contentTextarea.className = 'pb-textarea';
+        contentTextarea.style.minHeight = '80px';
+        contentTextarea.value = phase.content;
+        var savePBtn = document.createElement('button');
+        savePBtn.className = 'pb-btn';
+        savePBtn.textContent = 'Save Edit';
+        savePBtn.style.marginTop = '4px';
+        contentDiv.appendChild(contentTextarea);
+        contentDiv.appendChild(savePBtn);
+        li.appendChild(contentDiv);
+
+        // Toggle expand
+        editBtn.addEventListener('click', function (e) {
+          e.stopPropagation();
+          contentDiv.classList.toggle('pb-expanded');
+        });
+
+        // Save edit
+        savePBtn.addEventListener('click', function (e) {
+          e.stopPropagation();
+          phase.content = contentTextarea.value;
+          saveState();
+          refreshPhaseList();
+          addLog('Phase ' + phase.number + ' updated.');
+        });
+
+        // Set as current
+        setCurBtn.addEventListener('click', function (e) {
+          e.stopPropagation();
+          if (runnerState === 'running') return;
+          currentPhaseIndex = idx;
+          for (var j = 0; j < phases.length; j++) {
+            if (j < idx) phases[j].status = 'complete';
+            else phases[j].status = 'pending';
+          }
+          saveState();
+          refreshUI();
+          addLog('Set start point to Phase ' + phase.number + '.');
+        });
+
+        phaseListEl.appendChild(li);
+      })(i);
+    }
+  }
+
+  function refreshControls() {
+    if (!startBtn) return;
+    var noPhases = phases.length === 0;
+    startBtn.disabled = noPhases;
+    pauseBtn.disabled = runnerState !== 'running';
+    stopBtn.disabled = runnerState === 'idle' && currentPhaseIndex === 0;
+    skipBtn.disabled = noPhases || currentPhaseIndex >= phases.length;
+
+    if (runnerState === 'paused' || runnerState === 'complete') {
+      startBtn.textContent = '\u25B6 Resume';
+    } else {
+      startBtn.textContent = '\u25B6 Start';
+    }
+    if (runnerState === 'complete') {
+      startBtn.textContent = '\u21BB Restart';
+    }
+  }
+
+  // ============================================================
+  // INIT
+  // ============================================================
+
+  function waitForPage() {
+    var check = setInterval(function () {
+      if (document.body) {
+        clearInterval(check);
+        loadState();
+        injectStyles();
+        buildUI();
+      }
+    }, 200);
+  }
+
+  waitForPage();
+
+})();
