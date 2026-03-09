@@ -23,9 +23,12 @@
     phases: 'pb-phases',
     currentPhase: 'pb-current-phase',
     repoUrl: 'pb-repo-url',
+    repoName: 'pb-repo-name',
+    buildName: 'pb-build-name',
     state: 'pb-state',
     panelOpen: 'pb-panel-open',
-    autoCommit: 'pb-auto-commit'
+    autoCommit: 'pb-auto-commit',
+    autoSelectRepo: 'pb-auto-select-repo'
   };
 
   var IDLE_THRESHOLD = 5000;
@@ -37,6 +40,12 @@
   var PHASE_MARKER_RE = /---\s*PHASE\s+(\d+)\s*---/gi;
 
   var AUTO_COMMIT_MSG = 'All phases are now complete. Please commit all your changes with a clear, descriptive commit message summarizing what was done, then push to your current branch. Use: git add -A && git commit -m "your message" && git push';
+
+  var PHASE_COMMIT_FOOTER = '\n\nIMPORTANT: When you are finished with this task, commit all changes with a clear, descriptive commit message and push to your current branch. Do NOT write a summary or review in the chat after you are done — put your summary inside the commit message instead. Just commit, push, and stop.';
+
+  var REPO_SELECT_TIMEOUT = 500;
+  var REPO_SEARCH_DELAY = 800;
+  var REPO_CLICK_DELAY = 500;
 
   // ============================================================
   // STATE
@@ -311,6 +320,38 @@
     localStorage.setItem(STORAGE.autoCommit, val ? 'true' : 'false');
   }
 
+  function getRepoName() {
+    return localStorage.getItem(STORAGE.repoName) || '';
+  }
+
+  function saveRepoName(name) {
+    localStorage.setItem(STORAGE.repoName, name);
+  }
+
+  function getBuildName() {
+    return localStorage.getItem(STORAGE.buildName) || '';
+  }
+
+  function saveBuildName(name) {
+    localStorage.setItem(STORAGE.buildName, name);
+  }
+
+  function getAutoSelectRepo() {
+    return localStorage.getItem(STORAGE.autoSelectRepo) !== 'false';
+  }
+
+  function saveAutoSelectRepo(val) {
+    localStorage.setItem(STORAGE.autoSelectRepo, val ? 'true' : 'false');
+  }
+
+  function extractRepoName(url) {
+    if (!url) return '';
+    var match = url.match(/github\.com\/[^\/]+\/([^\/\s\?#]+)/i);
+    if (match) return match[1].replace(/\.git$/, '');
+    if (url.indexOf('/') === -1 && url.indexOf('.') === -1) return url.trim();
+    return '';
+  }
+
   // ============================================================
   // PHASE PARSING & VARIABLES
   // ============================================================
@@ -343,10 +384,212 @@
 
   function substituteVars(text) {
     var repoUrl = getRepoUrl();
+    var repoName = getRepoName();
+    var buildName = getBuildName();
     return text
       .replace(/\{\{REPO_URL\}\}/gi, repoUrl)
+      .replace(/\{\{REPO_NAME\}\}/gi, repoName)
+      .replace(/\{\{BUILD_NAME\}\}/gi, buildName)
       .replace(/\{\{PHASE_NUMBER\}\}/gi, String(currentPhaseIndex + 1))
       .replace(/\{\{TOTAL_PHASES\}\}/gi, String(phases.length));
+  }
+
+  function wrapPhaseContent(text, phaseIdx) {
+    var wrapped = '';
+    var repoName = getRepoName();
+    var buildName = getBuildName();
+
+    // First phase: prepend build title for auto-naming the conversation
+    if (phaseIdx === 0 && (buildName || repoName)) {
+      var title = buildName || ('Phase Build - ' + repoName);
+      wrapped += '# ' + title + '\n\n';
+    }
+
+    wrapped += text;
+
+    // Append commit + no-summary instruction
+    if (getAutoCommit()) {
+      wrapped += PHASE_COMMIT_FOOTER;
+    }
+
+    return wrapped;
+  }
+
+  // ============================================================
+  // REPO DROPDOWN SELECTION (Claude Code Web)
+  // ============================================================
+
+  function selectRepoInDropdown(repoName, callback) {
+    if (!repoName) {
+      addLog('No repo name set. Skipping repo selection.');
+      if (callback) callback();
+      return;
+    }
+    if (SITE !== 'claude') {
+      addLog('Repo selection only available on Claude. Skipping.');
+      if (callback) callback();
+      return;
+    }
+
+    addLog('Selecting repo: ' + repoName + '...');
+
+    // Step 1: Find the repo selector button in the top-left area
+    // Claude Code Web shows the repo name in a clickable button near the top-left
+    var repoBtn = null;
+
+    // Try specific selectors first
+    var btnSelectors = [
+      'button[data-testid="repo-selector"]',
+      'button[aria-label*="repo" i]',
+      'button[aria-label*="repository" i]',
+      '[class*="repo-selector"] button',
+      '[class*="repoSelector"] button'
+    ];
+
+    for (var s = 0; s < btnSelectors.length; s++) {
+      repoBtn = document.querySelector(btnSelectors[s]);
+      if (repoBtn) break;
+    }
+
+    // Fallback: look for buttons in the top-left area (rect.left < 300, rect.top < 80)
+    // that contain short text (likely a repo name like "Ap..." or "AppSitter")
+    if (!repoBtn) {
+      var allBtns = document.querySelectorAll('button, [role="button"]');
+      for (var i = 0; i < allBtns.length; i++) {
+        var el = allBtns[i];
+        var rect = el.getBoundingClientRect();
+        if (rect.left < 300 && rect.top < 80 && rect.width > 20 && rect.height > 10) {
+          var text = el.textContent.trim();
+          // Skip known non-repo buttons
+          if (text && text.length > 0 && text.length < 40 &&
+              !text.match(/^(Auto|Send|Stop|Pause|Start|Skip|Save|Edit|Delete|Archive|Rename|Share|New|PB|Settings|Help|Search|\+)/i) &&
+              !el.closest('#pb-panel') && !el.closest('#pb-toggle')) {
+            repoBtn = el;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!repoBtn) {
+      addLog('WARNING: Could not find repo selector button. Skipping.');
+      if (callback) callback();
+      return;
+    }
+
+    repoBtn.click();
+    addLog('Clicked repo dropdown.');
+
+    // Step 2: Wait for dropdown to open, find the search input
+    setTimeout(function () {
+      var searchInput = null;
+
+      // Look for visible search/filter inputs that appeared in the dropdown area
+      var inputs = document.querySelectorAll(
+        'input[type="text"], input[type="search"], input:not([type]), ' +
+        'input[placeholder*="search" i], input[placeholder*="repo" i], input[placeholder*="filter" i]'
+      );
+
+      for (var i = 0; i < inputs.length; i++) {
+        var inp = inputs[i];
+        var rect = inp.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0 && rect.left < 400 && rect.top < 300) {
+          // Make sure it's not our own panel's input
+          if (!inp.closest('#pb-panel')) {
+            searchInput = inp;
+            break;
+          }
+        }
+      }
+
+      // Fallback: find input inside any popover/dropdown/dialog that appeared
+      if (!searchInput) {
+        var containers = document.querySelectorAll(
+          '[role="listbox"], [role="dialog"], [role="menu"], ' +
+          '[class*="dropdown"], [class*="popover"], [class*="popup"], [class*="modal"]'
+        );
+        for (var c = 0; c < containers.length; c++) {
+          var inp2 = containers[c].querySelector('input');
+          if (inp2 && !inp2.closest('#pb-panel')) {
+            searchInput = inp2;
+            break;
+          }
+        }
+      }
+
+      if (!searchInput) {
+        addLog('WARNING: Could not find repo search input. Skipping.');
+        document.body.click();
+        if (callback) callback();
+        return;
+      }
+
+      // Step 3: Type the repo name into the search box
+      searchInput.focus();
+      var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      nativeSetter.call(searchInput, repoName);
+      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+      searchInput.dispatchEvent(new Event('change', { bubbles: true }));
+      addLog('Typed repo name: ' + repoName);
+
+      // Step 4: Wait for filtering, then click the matching result
+      setTimeout(function () {
+        var found = false;
+        var lowerName = repoName.toLowerCase();
+
+        // Look for matching items in dropdown results
+        var itemSelectors = [
+          '[role="option"]',
+          '[role="menuitem"]',
+          '[class*="dropdown"] li',
+          '[class*="dropdown"] [class*="item"]',
+          '[class*="popover"] li',
+          '[class*="popover"] [class*="item"]',
+          '[class*="list"] [class*="item"]'
+        ];
+
+        for (var s = 0; s < itemSelectors.length; s++) {
+          var items = document.querySelectorAll(itemSelectors[s]);
+          for (var i = 0; i < items.length; i++) {
+            var itemText = items[i].textContent.trim().toLowerCase();
+            if (itemText.indexOf(lowerName) !== -1 && !items[i].closest('#pb-panel')) {
+              items[i].click();
+              addLog('Selected repo: ' + repoName);
+              found = true;
+              break;
+            }
+          }
+          if (found) break;
+        }
+
+        // Broader fallback: any clickable element in dropdown area matching the name
+        if (!found) {
+          var clickables = document.querySelectorAll('a, button, [role="button"], div[tabindex], li, span[tabindex]');
+          for (var j = 0; j < clickables.length; j++) {
+            var cel = clickables[j];
+            var crect = cel.getBoundingClientRect();
+            if (crect.left < 400 && crect.top > 40 && crect.top < 400 && crect.width > 0) {
+              var celText = cel.textContent.trim().toLowerCase();
+              if (celText.indexOf(lowerName) !== -1 && celText.length < 100 && !cel.closest('#pb-panel')) {
+                cel.click();
+                addLog('Selected repo: ' + repoName);
+                found = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (!found) {
+          addLog('WARNING: Could not find "' + repoName + '" in dropdown. Closing.');
+          document.body.click();
+        }
+
+        setTimeout(function () {
+          if (callback) callback();
+        }, REPO_CLICK_DELAY);
+      }, REPO_SEARCH_DELAY);
+    }, REPO_SELECT_TIMEOUT);
   }
 
   // ============================================================
@@ -393,47 +636,64 @@
     phase.status = 'running';
     saveState();
     refreshUI();
-    addLog('Injecting Phase ' + phase.number + '...');
 
-    var text = substituteVars(phase.content);
-    var injected = injectText(text);
-    if (!injected) {
-      addLog('ERROR: No chat input found. Pausing.');
-      runnerState = 'paused';
-      saveState();
-      refreshUI();
-      return;
+    // Step 1: Auto-select repo in dropdown if enabled (before injecting phase)
+    var repoName = getRepoName();
+    var shouldSelectRepo = getAutoSelectRepo() && repoName && SITE === 'claude';
+
+    function injectAndSend() {
+      addLog('Injecting Phase ' + phase.number + '...');
+
+      var text = substituteVars(phase.content);
+      text = wrapPhaseContent(text, currentPhaseIndex);
+      var injected = injectText(text);
+      if (!injected) {
+        addLog('ERROR: No chat input found. Pausing.');
+        runnerState = 'paused';
+        saveState();
+        refreshUI();
+        return;
+      }
+
+      addLog('Text injected. Attempting to send...');
+
+      setTimeout(function () {
+        if (runnerState !== 'running') return;
+
+        attemptSend(SEND_MAX_RETRIES, function (sent) {
+          if (!sent) {
+            addLog('WARNING: Could not auto-send. Please click Send manually. Babysitter will still watch for completion.');
+          } else {
+            addLog('Phase ' + phase.number + ' sent. Watching for completion...');
+          }
+
+          setTimeout(function () {
+            if (runnerState !== 'running') return;
+
+            startCompletionDetection(function () {
+              phase.status = 'complete';
+              addLog('Phase ' + phase.number + ' complete!');
+              currentPhaseIndex++;
+              saveState();
+              refreshUI();
+
+              setTimeout(function () {
+                if (runnerState === 'running') runCurrentPhase();
+              }, INTER_PHASE_DELAY);
+            });
+          }, POST_SEND_DELAY);
+        });
+      }, 500);
     }
 
-    addLog('Text injected. Attempting to send...');
-
-    setTimeout(function () {
-      if (runnerState !== 'running') return;
-
-      attemptSend(SEND_MAX_RETRIES, function (sent) {
-        if (!sent) {
-          addLog('WARNING: Could not auto-send. Please click Send manually. Babysitter will still watch for completion.');
-        } else {
-          addLog('Phase ' + phase.number + ' sent. Watching for completion...');
-        }
-
-        setTimeout(function () {
-          if (runnerState !== 'running') return;
-
-          startCompletionDetection(function () {
-            phase.status = 'complete';
-            addLog('Phase ' + phase.number + ' complete!');
-            currentPhaseIndex++;
-            saveState();
-            refreshUI();
-
-            setTimeout(function () {
-              if (runnerState === 'running') runCurrentPhase();
-            }, INTER_PHASE_DELAY);
-          });
-        }, POST_SEND_DELAY);
+    if (shouldSelectRepo) {
+      selectRepoInDropdown(repoName, function () {
+        if (runnerState !== 'running') return;
+        injectAndSend();
       });
-    }, 500);
+    } else {
+      injectAndSend();
+    }
   }
 
   // ============================================================
@@ -700,6 +960,77 @@
     repoHint.textContent = 'Use {{REPO_URL}} in your phases to auto-insert this URL.';
     repoSection.appendChild(repoHint);
 
+    // Repo Name (for dropdown selection)
+    var repoNameLabel = document.createElement('div');
+    repoNameLabel.className = 'pb-section-title';
+    repoNameLabel.style.marginTop = '10px';
+    repoNameLabel.textContent = 'Repo Name (for dropdown)';
+    repoSection.appendChild(repoNameLabel);
+
+    var repoNameRow = document.createElement('div');
+    repoNameRow.className = 'pb-repo-row';
+    var repoNameInput = document.createElement('input');
+    repoNameInput.className = 'pb-input';
+    repoNameInput.type = 'text';
+    repoNameInput.placeholder = 'e.g. AppSitter (auto-extracted from URL)';
+    repoNameInput.value = getRepoName();
+    var repoNameSaveBtn = document.createElement('button');
+    repoNameSaveBtn.className = 'pb-btn';
+    repoNameSaveBtn.textContent = 'Save';
+    repoNameRow.appendChild(repoNameInput);
+    repoNameRow.appendChild(repoNameSaveBtn);
+    repoSection.appendChild(repoNameRow);
+
+    var repoNameHint = document.createElement('div');
+    repoNameHint.className = 'pb-hint';
+    repoNameHint.textContent = 'Just the repo name (not URL). Auto-fills from GitHub URL above. Used to select the repo in Claude Code Web dropdown. Use {{REPO_NAME}} in phases.';
+    repoSection.appendChild(repoNameHint);
+
+    // Auto-select repo checkbox
+    var selectRepoRow = document.createElement('div');
+    selectRepoRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:8px;';
+    var selectRepoCheckbox = document.createElement('input');
+    selectRepoCheckbox.type = 'checkbox';
+    selectRepoCheckbox.id = 'pb-auto-select-repo';
+    selectRepoCheckbox.checked = getAutoSelectRepo();
+    selectRepoCheckbox.style.cssText = 'accent-color:#da7757;width:14px;height:14px;cursor:pointer;';
+    var selectRepoLabel = document.createElement('label');
+    selectRepoLabel.htmlFor = 'pb-auto-select-repo';
+    selectRepoLabel.style.cssText = 'color:#e0e0e0;font-size:11px;cursor:pointer;font-weight:600;';
+    selectRepoLabel.textContent = 'Auto-select repo before each phase';
+    selectRepoRow.appendChild(selectRepoCheckbox);
+    selectRepoRow.appendChild(selectRepoLabel);
+    repoSection.appendChild(selectRepoRow);
+    var selectRepoHint = document.createElement('div');
+    selectRepoHint.className = 'pb-hint';
+    selectRepoHint.textContent = 'Clicks the Claude Code Web repo dropdown, types the name, and selects it before injecting each phase. Guarantees correct repo.';
+    repoSection.appendChild(selectRepoHint);
+
+    // Build Name (for conversation title)
+    var buildNameLabel = document.createElement('div');
+    buildNameLabel.className = 'pb-section-title';
+    buildNameLabel.style.marginTop = '10px';
+    buildNameLabel.textContent = 'Build Name (optional)';
+    repoSection.appendChild(buildNameLabel);
+
+    var buildNameRow = document.createElement('div');
+    buildNameRow.className = 'pb-repo-row';
+    var buildNameInput = document.createElement('input');
+    buildNameInput.className = 'pb-input';
+    buildNameInput.type = 'text';
+    buildNameInput.placeholder = 'e.g. Phase Build - AppSitter';
+    buildNameInput.value = getBuildName();
+    var buildNameSaveBtn = document.createElement('button');
+    buildNameSaveBtn.className = 'pb-btn';
+    buildNameSaveBtn.textContent = 'Save';
+    buildNameRow.appendChild(buildNameInput);
+    buildNameRow.appendChild(buildNameSaveBtn);
+    repoSection.appendChild(buildNameRow);
+    var buildNameHint = document.createElement('div');
+    buildNameHint.className = 'pb-hint';
+    buildNameHint.textContent = 'Prepended as a title to the first phase message. Claude Code Web auto-names the conversation from it. Use {{BUILD_NAME}} in phases.';
+    repoSection.appendChild(buildNameHint);
+
     // Auto-commit checkbox
     var commitRow = document.createElement('div');
     commitRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:8px;border-top:1px solid #333;';
@@ -815,6 +1146,45 @@
     commitCheckbox.addEventListener('change', function () {
       saveAutoCommit(commitCheckbox.checked);
       addLog('Auto-commit ' + (commitCheckbox.checked ? 'enabled' : 'disabled') + '.');
+    });
+
+    // Repo Name save
+    repoNameSaveBtn.addEventListener('click', function () {
+      saveRepoName(repoNameInput.value.trim());
+      addLog('Repo name saved: ' + repoNameInput.value.trim());
+    });
+
+    // Auto-extract repo name when saving repo URL
+    repoSaveBtn.addEventListener('click', function () {
+      var url = repoInput.value.trim();
+      var extracted = extractRepoName(url);
+      if (extracted && !repoNameInput.value.trim()) {
+        repoNameInput.value = extracted;
+        saveRepoName(extracted);
+        addLog('Auto-extracted repo name: ' + extracted);
+      }
+    });
+
+    // Also auto-extract on URL input blur
+    repoInput.addEventListener('blur', function () {
+      var url = repoInput.value.trim();
+      var extracted = extractRepoName(url);
+      if (extracted && !repoNameInput.value.trim()) {
+        repoNameInput.value = extracted;
+        saveRepoName(extracted);
+      }
+    });
+
+    // Auto-select repo checkbox
+    selectRepoCheckbox.addEventListener('change', function () {
+      saveAutoSelectRepo(selectRepoCheckbox.checked);
+      addLog('Auto-select repo ' + (selectRepoCheckbox.checked ? 'enabled' : 'disabled') + '.');
+    });
+
+    // Build Name save
+    buildNameSaveBtn.addEventListener('click', function () {
+      saveBuildName(buildNameInput.value.trim());
+      addLog('Build name saved: ' + buildNameInput.value.trim());
     });
 
     parseBtn.addEventListener('click', function () {
