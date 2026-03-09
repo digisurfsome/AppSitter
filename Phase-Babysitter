@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Phase Babysitter
+// @name         AppSitter
 // @namespace    https://github.com/digisurfsome/AppSitter
-// @version      1.0
+// @version      2.0
 // @description  Auto-feeds build phases into AI chat sequentially — watches for completion and advances automatically
 // @author       AppSitter
 // @match        https://claude.ai/*
@@ -28,7 +28,7 @@
     state: 'pb-state',
     panelOpen: 'pb-panel-open',
     autoCommit: 'pb-auto-commit',
-    autoSelectRepo: 'pb-auto-select-repo'
+    zoom: 'pb-zoom'
   };
 
   var IDLE_THRESHOLD = 5000;
@@ -46,6 +46,7 @@
   var REPO_SELECT_TIMEOUT = 500;
   var REPO_SEARCH_DELAY = 800;
   var REPO_CLICK_DELAY = 500;
+  var RENAME_DELAY = 30000;
 
   // ============================================================
   // STATE
@@ -68,6 +69,8 @@
   var stopBtn = null;
   var skipBtn = null;
   var toggleBtn = null;
+  var renameTimer = null;
+  var zoomLevel = 100;
 
   // ============================================================
   // SITE DETECTION
@@ -336,12 +339,13 @@
     localStorage.setItem(STORAGE.buildName, name);
   }
 
-  function getAutoSelectRepo() {
-    return localStorage.getItem(STORAGE.autoSelectRepo) !== 'false';
+  function getZoom() {
+    var z = parseInt(localStorage.getItem(STORAGE.zoom), 10);
+    return (z && z >= 30 && z <= 300) ? z : 100;
   }
 
-  function saveAutoSelectRepo(val) {
-    localStorage.setItem(STORAGE.autoSelectRepo, val ? 'true' : 'false');
+  function saveZoom(val) {
+    localStorage.setItem(STORAGE.zoom, String(val));
   }
 
   function extractRepoName(url) {
@@ -593,6 +597,117 @@
   }
 
   // ============================================================
+  // CONVERSATION RENAME (Claude Code Web)
+  // ============================================================
+
+  function renameConversation(name) {
+    if (!name || SITE !== 'claude') return;
+    addLog('Attempting to rename conversation: ' + name + '...');
+
+    // Step 1: Find the conversation title/dropdown button at top-center
+    var titleBtn = null;
+    var selectors = [
+      '[class*="conversation"] button',
+      'header [class*="title"]',
+      'button[class*="title"]'
+    ];
+    for (var s = 0; s < selectors.length; s++) {
+      titleBtn = document.querySelector(selectors[s]);
+      if (titleBtn && !titleBtn.closest('#pb-panel')) break;
+      titleBtn = null;
+    }
+
+    // Fallback: look for a clickable element at top-center with a dropdown arrow
+    if (!titleBtn) {
+      var candidates = document.querySelectorAll('button, [role="button"], span[class*="title"]');
+      for (var i = 0; i < candidates.length; i++) {
+        var el = candidates[i];
+        var rect = el.getBoundingClientRect();
+        // Top center area
+        if (rect.top < 60 && rect.left > 200 && rect.right < (window.innerWidth - 200) && rect.width > 50) {
+          if (!el.closest('#pb-panel')) {
+            titleBtn = el;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!titleBtn) {
+      addLog('WARNING: Could not find conversation title button. Skipping rename.');
+      return;
+    }
+
+    titleBtn.click();
+    addLog('Clicked conversation title dropdown.');
+
+    // Step 2: Wait for dropdown menu, click Rename
+    setTimeout(function () {
+      var renameBtn = null;
+      var menuItems = document.querySelectorAll('[role="menuitem"], [role="option"], button, a');
+      for (var i = 0; i < menuItems.length; i++) {
+        var itemText = menuItems[i].textContent.trim().toLowerCase();
+        if (itemText === 'rename' && !menuItems[i].closest('#pb-panel')) {
+          renameBtn = menuItems[i];
+          break;
+        }
+      }
+
+      if (!renameBtn) {
+        addLog('WARNING: Could not find Rename option. Closing menu.');
+        document.body.click();
+        return;
+      }
+
+      renameBtn.click();
+      addLog('Clicked Rename.');
+
+      // Step 3: Wait for editable title field, type the name
+      setTimeout(function () {
+        // Look for an editable input that appeared in the title area
+        var editableInput = null;
+        var inputs = document.querySelectorAll('input[type="text"], input:not([type]), [contenteditable="true"]');
+        for (var i = 0; i < inputs.length; i++) {
+          var inp = inputs[i];
+          var rect = inp.getBoundingClientRect();
+          if (rect.top < 60 && rect.left > 100 && rect.width > 50 && !inp.closest('#pb-panel')) {
+            editableInput = inp;
+            break;
+          }
+        }
+
+        if (!editableInput) {
+          addLog('WARNING: Could not find editable title field. Skipping.');
+          return;
+        }
+
+        editableInput.focus();
+        if (editableInput.tagName === 'INPUT') {
+          var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          nativeSetter.call(editableInput, name);
+          editableInput.dispatchEvent(new Event('input', { bubbles: true }));
+          editableInput.dispatchEvent(new Event('change', { bubbles: true }));
+        } else {
+          // contenteditable
+          var sel = window.getSelection();
+          var range = document.createRange();
+          range.selectNodeContents(editableInput);
+          sel.removeAllRanges();
+          sel.addRange(range);
+          document.execCommand('insertText', false, name);
+        }
+
+        // Click outside to save
+        setTimeout(function () {
+          editableInput.blur();
+          document.body.click();
+          addLog('Conversation renamed to: ' + name);
+        }, 300);
+      }, 500);
+    }, 500);
+  }
+
+  // ============================================================
   // PHASE RUNNER
   // ============================================================
 
@@ -637,9 +752,9 @@
     saveState();
     refreshUI();
 
-    // Step 1: Auto-select repo in dropdown if enabled (before injecting phase)
+    // Step 1: Auto-select repo in dropdown (always on when repo name is set)
     var repoName = getRepoName();
-    var shouldSelectRepo = getAutoSelectRepo() && repoName && SITE === 'claude';
+    var shouldSelectRepo = repoName && SITE === 'claude';
 
     function injectAndSend() {
       addLog('Injecting Phase ' + phase.number + '...');
@@ -729,37 +844,64 @@
       '#pb-toggle:hover { transform:scale(1.1);background:#c4664a; }',
       '',
       '#pb-panel {',
-      '  position:fixed;top:50%;right:16px;transform:translateY(-50%);',
+      '  position:fixed;top:50%;right:16px;',
       '  width:320px;max-height:90vh;z-index:99999;',
       '  background:#1e1e1c;border:1px solid #444;border-radius:10px;',
       '  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;',
       '  display:flex;flex-direction:column;overflow:hidden;',
       '  box-shadow:0 4px 20px rgba(0,0,0,0.5);',
+      '  transform-origin:top right;',
       '}',
       '#pb-panel.pb-hidden { display:none; }',
       '',
-      '.pb-header {',
-      '  display:flex;align-items:center;justify-content:space-between;',
-      '  padding:10px 14px;background:#262624;border-bottom:1px solid #444;',
-      '  flex-shrink:0;',
+      '/* Zoom header: big [-] | number | [+] */',
+      '.pb-zoom-bar {',
+      '  display:flex;align-items:stretch;',
+      '  background:#262624;border-bottom:1px solid #444;',
+      '  flex-shrink:0;min-height:36px;',
       '}',
-      '.pb-header-title {',
-      '  color:#da7757;font-size:14px;font-weight:700;',
+      '.pb-zoom-btn {',
+      '  flex:1;background:none;border:none;color:#fff;',
+      '  cursor:pointer;font-size:20px;font-weight:700;',
+      '  transition:background 0.15s;display:flex;',
+      '  align-items:center;justify-content:center;',
       '}',
-      '.pb-header-btns { display:flex;gap:6px;align-items:center; }',
-      '.pb-hdr-btn {',
-      '  background:none;border:none;color:#999;cursor:pointer;',
-      '  font-size:16px;padding:0 2px;line-height:1;transition:color 0.15s;',
+      '.pb-zoom-btn:hover { background:#333; }',
+      '.pb-zoom-btn:active { background:#da7757; }',
+      '.pb-zoom-input {',
+      '  flex:1;background:#1e1e1c;color:#fff;border:none;',
+      '  border-left:1px solid #444;border-right:1px solid #444;',
+      '  text-align:center;font-size:13px;font-weight:600;',
+      '  font-family:inherit;outline:none;min-width:0;',
       '}',
-      '.pb-hdr-btn:hover { color:#da7757; }',
+      '.pb-zoom-input:focus { background:#2a2a28; }',
       '',
+      '/* Status bar: left=Idle+count, center=AppSitter, right=claude+minimize */',
       '.pb-status-bar {',
       '  display:flex;align-items:center;justify-content:space-between;',
       '  padding:8px 14px;background:#232321;border-bottom:1px solid #333;',
       '  flex-shrink:0;',
       '}',
-      '.pb-status-text { color:#e0e0e0;font-size:12px;font-weight:600; }',
-      '.pb-phase-count { color:#999;font-size:11px; }',
+      '.pb-status-left {',
+      '  display:flex;align-items:center;gap:6px;',
+      '}',
+      '.pb-status-text { color:#fff;font-size:12px;font-weight:600; }',
+      '.pb-phase-count { color:#fff;font-size:12px;font-weight:600; }',
+      '.pb-status-center {',
+      '  color:#da7757;font-size:14px;font-weight:700;',
+      '  text-align:center;flex:1;',
+      '}',
+      '.pb-status-right {',
+      '  display:flex;align-items:center;gap:6px;',
+      '}',
+      '.pb-site-label {',
+      '  color:#fff;font-size:12px;font-weight:600;',
+      '}',
+      '.pb-hdr-btn {',
+      '  background:none;border:none;color:#fff;cursor:pointer;',
+      '  font-size:18px;font-weight:700;padding:0 2px;line-height:1;transition:color 0.15s;',
+      '}',
+      '.pb-hdr-btn:hover { color:#da7757; }',
       '',
       '.pb-body {',
       '  flex:1;overflow-y:auto;padding:0;',
@@ -820,7 +962,15 @@
       '.pb-github-info {',
       '  color:#777;font-size:10px;line-height:1.5;margin-bottom:8px;',
       '  padding:6px 8px;background:#232321;border-radius:4px;border-left:2px solid #da7757;',
+      '  display:none;',
       '}',
+      '.pb-github-info.pb-expanded { display:block; }',
+      '',
+      '.pb-readmore {',
+      '  color:#da7757;font-size:10px;cursor:pointer;margin-bottom:6px;',
+      '  display:inline-block;',
+      '}',
+      '.pb-readmore:hover { text-decoration:underline; }',
       '',
       '.pb-phase-list { list-style:none;margin:0;padding:0; }',
       '.pb-phase-item {',
@@ -876,12 +1026,19 @@
   // UI BUILDING
   // ============================================================
 
+  function applyZoom() {
+    if (!panelEl) return;
+    panelEl.style.transform = 'translateY(-50%) scale(' + (zoomLevel / 100) + ')';
+  }
+
   function buildUI() {
+    zoomLevel = getZoom();
+
     // Floating toggle button
     toggleBtn = document.createElement('button');
     toggleBtn.id = 'pb-toggle';
-    toggleBtn.textContent = 'PB';
-    toggleBtn.title = 'Toggle Phase Babysitter';
+    toggleBtn.textContent = 'AS';
+    toggleBtn.title = 'Toggle AppSitter';
     document.body.appendChild(toggleBtn);
 
     // Main panel
@@ -890,39 +1047,68 @@
     var savedOpen = localStorage.getItem(STORAGE.panelOpen);
     if (savedOpen === 'false') panelEl.classList.add('pb-hidden');
 
-    // -- Header --
-    var header = document.createElement('div');
-    header.className = 'pb-header';
-    var titleSpan = document.createElement('span');
-    titleSpan.className = 'pb-header-title';
-    titleSpan.textContent = 'Phase Babysitter';
-    var headerBtns = document.createElement('div');
-    headerBtns.className = 'pb-header-btns';
-    var siteLabel = document.createElement('span');
-    siteLabel.style.cssText = 'color:#666;font-size:10px;';
-    siteLabel.textContent = SITE;
-    var minimizeBtn = document.createElement('button');
-    minimizeBtn.className = 'pb-hdr-btn';
-    minimizeBtn.textContent = '\u2013';
-    minimizeBtn.title = 'Minimize';
-    headerBtns.appendChild(siteLabel);
-    headerBtns.appendChild(minimizeBtn);
-    header.appendChild(titleSpan);
-    header.appendChild(headerBtns);
-    panelEl.appendChild(header);
+    // -- Zoom bar: big [-] | number input | [+] --
+    var zoomBar = document.createElement('div');
+    zoomBar.className = 'pb-zoom-bar';
 
-    // -- Status bar --
+    var zoomMinusBtn = document.createElement('button');
+    zoomMinusBtn.className = 'pb-zoom-btn';
+    zoomMinusBtn.textContent = '\u2212';
+    zoomMinusBtn.title = 'Zoom out';
+
+    var zoomInput = document.createElement('input');
+    zoomInput.className = 'pb-zoom-input';
+    zoomInput.type = 'text';
+    zoomInput.value = zoomLevel;
+    zoomInput.title = 'Zoom %';
+
+    var zoomPlusBtn = document.createElement('button');
+    zoomPlusBtn.className = 'pb-zoom-btn';
+    zoomPlusBtn.textContent = '+';
+    zoomPlusBtn.title = 'Zoom in';
+
+    zoomBar.appendChild(zoomMinusBtn);
+    zoomBar.appendChild(zoomInput);
+    zoomBar.appendChild(zoomPlusBtn);
+    panelEl.appendChild(zoomBar);
+
+    // -- Status bar: left=Idle+count, center=AppSitter, right=claude+minimize --
     var statusBar = document.createElement('div');
     statusBar.className = 'pb-status-bar';
+
+    var statusLeft = document.createElement('div');
+    statusLeft.className = 'pb-status-left';
     statusTextEl = document.createElement('span');
     statusTextEl.className = 'pb-status-text';
     statusTextEl.textContent = 'Idle';
     phaseCountEl = document.createElement('span');
     phaseCountEl.className = 'pb-phase-count';
     phaseCountEl.textContent = '0/0';
-    statusBar.appendChild(statusTextEl);
-    statusBar.appendChild(phaseCountEl);
+    statusLeft.appendChild(statusTextEl);
+    statusLeft.appendChild(phaseCountEl);
+
+    var statusCenter = document.createElement('span');
+    statusCenter.className = 'pb-status-center';
+    statusCenter.textContent = 'AppSitter';
+
+    var statusRight = document.createElement('div');
+    statusRight.className = 'pb-status-right';
+    var siteLabel = document.createElement('span');
+    siteLabel.className = 'pb-site-label';
+    siteLabel.textContent = SITE;
+    var minimizeBtn = document.createElement('button');
+    minimizeBtn.className = 'pb-hdr-btn';
+    minimizeBtn.textContent = '\u2013';
+    minimizeBtn.title = 'Minimize';
+    statusRight.appendChild(siteLabel);
+    statusRight.appendChild(minimizeBtn);
+
+    statusBar.appendChild(statusLeft);
+    statusBar.appendChild(statusCenter);
+    statusBar.appendChild(statusRight);
     panelEl.appendChild(statusBar);
+
+    applyZoom();
 
     // -- Scrollable body --
     var body = document.createElement('div');
@@ -933,8 +1119,13 @@
     repoSection.className = 'pb-section';
     var repoTitle = document.createElement('div');
     repoTitle.className = 'pb-section-title';
-    repoTitle.textContent = 'GitHub Repository (optional)';
+    repoTitle.textContent = 'GitHub Repository';
     repoSection.appendChild(repoTitle);
+
+    var readMoreLink = document.createElement('span');
+    readMoreLink.className = 'pb-readmore';
+    readMoreLink.textContent = 'Read more \u25BC';
+    repoSection.appendChild(readMoreLink);
 
     var repoInfo = document.createElement('div');
     repoInfo.className = 'pb-github-info';
@@ -955,56 +1146,12 @@
     repoRow.appendChild(repoSaveBtn);
     repoSection.appendChild(repoRow);
 
-    var repoHint = document.createElement('div');
-    repoHint.className = 'pb-hint';
-    repoHint.textContent = 'Use {{REPO_URL}} in your phases to auto-insert this URL.';
-    repoSection.appendChild(repoHint);
-
-    // Repo Name (for dropdown selection)
-    var repoNameLabel = document.createElement('div');
-    repoNameLabel.className = 'pb-section-title';
-    repoNameLabel.style.marginTop = '10px';
-    repoNameLabel.textContent = 'Repo Name (for dropdown)';
-    repoSection.appendChild(repoNameLabel);
-
-    var repoNameRow = document.createElement('div');
-    repoNameRow.className = 'pb-repo-row';
-    var repoNameInput = document.createElement('input');
-    repoNameInput.className = 'pb-input';
-    repoNameInput.type = 'text';
-    repoNameInput.placeholder = 'e.g. AppSitter (auto-extracted from URL)';
-    repoNameInput.value = getRepoName();
-    var repoNameSaveBtn = document.createElement('button');
-    repoNameSaveBtn.className = 'pb-btn';
-    repoNameSaveBtn.textContent = 'Save';
-    repoNameRow.appendChild(repoNameInput);
-    repoNameRow.appendChild(repoNameSaveBtn);
-    repoSection.appendChild(repoNameRow);
-
-    var repoNameHint = document.createElement('div');
-    repoNameHint.className = 'pb-hint';
-    repoNameHint.textContent = 'Just the repo name (not URL). Auto-fills from GitHub URL above. Used to select the repo in Claude Code Web dropdown. Use {{REPO_NAME}} in phases.';
-    repoSection.appendChild(repoNameHint);
-
-    // Auto-select repo checkbox
-    var selectRepoRow = document.createElement('div');
-    selectRepoRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:8px;';
-    var selectRepoCheckbox = document.createElement('input');
-    selectRepoCheckbox.type = 'checkbox';
-    selectRepoCheckbox.id = 'pb-auto-select-repo';
-    selectRepoCheckbox.checked = getAutoSelectRepo();
-    selectRepoCheckbox.style.cssText = 'accent-color:#da7757;width:14px;height:14px;cursor:pointer;';
-    var selectRepoLabel = document.createElement('label');
-    selectRepoLabel.htmlFor = 'pb-auto-select-repo';
-    selectRepoLabel.style.cssText = 'color:#e0e0e0;font-size:11px;cursor:pointer;font-weight:600;';
-    selectRepoLabel.textContent = 'Auto-select repo before each phase';
-    selectRepoRow.appendChild(selectRepoCheckbox);
-    selectRepoRow.appendChild(selectRepoLabel);
-    repoSection.appendChild(selectRepoRow);
-    var selectRepoHint = document.createElement('div');
-    selectRepoHint.className = 'pb-hint';
-    selectRepoHint.textContent = 'Clicks the Claude Code Web repo dropdown, types the name, and selects it before injecting each phase. Guarantees correct repo.';
-    repoSection.appendChild(selectRepoHint);
+    // Repo Name (read-only display, auto-filled)
+    var repoNameDisplay = document.createElement('div');
+    repoNameDisplay.style.cssText = 'color:#e0e0e0;font-size:11px;margin-top:6px;padding:5px 8px;background:#262624;border-radius:4px;';
+    var currentRepoName = getRepoName();
+    repoNameDisplay.textContent = currentRepoName ? 'Repo: ' + currentRepoName : 'Repo name auto-fills when you save a URL';
+    repoSection.appendChild(repoNameDisplay);
 
     // Build Name (for conversation title)
     var buildNameLabel = document.createElement('div');
@@ -1028,7 +1175,7 @@
     repoSection.appendChild(buildNameRow);
     var buildNameHint = document.createElement('div');
     buildNameHint.className = 'pb-hint';
-    buildNameHint.textContent = 'Prepended as a title to the first phase message. Claude Code Web auto-names the conversation from it. Use {{BUILD_NAME}} in phases.';
+    buildNameHint.textContent = 'Titles the first phase message. Claude Code Web auto-names the conversation from it.';
     repoSection.appendChild(buildNameHint);
 
     // Auto-commit checkbox
@@ -1128,6 +1275,33 @@
     // EVENT HANDLERS
     // ============================================================
 
+    // Zoom handlers
+    zoomMinusBtn.addEventListener('click', function () {
+      zoomLevel = Math.max(30, zoomLevel - 10);
+      zoomInput.value = zoomLevel;
+      saveZoom(zoomLevel);
+      applyZoom();
+    });
+    zoomPlusBtn.addEventListener('click', function () {
+      zoomLevel = Math.min(300, zoomLevel + 10);
+      zoomInput.value = zoomLevel;
+      saveZoom(zoomLevel);
+      applyZoom();
+    });
+    zoomInput.addEventListener('change', function () {
+      var val = parseInt(zoomInput.value, 10);
+      if (val && val >= 30 && val <= 300) {
+        zoomLevel = val;
+        saveZoom(zoomLevel);
+        applyZoom();
+      } else {
+        zoomInput.value = zoomLevel;
+      }
+    });
+    zoomInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') zoomInput.blur();
+    });
+
     toggleBtn.addEventListener('click', function () {
       panelEl.classList.toggle('pb-hidden');
       localStorage.setItem(STORAGE.panelOpen, !panelEl.classList.contains('pb-hidden'));
@@ -1138,47 +1312,29 @@
       localStorage.setItem(STORAGE.panelOpen, 'false');
     });
 
+    // Read more toggle
+    readMoreLink.addEventListener('click', function () {
+      var expanded = repoInfo.classList.toggle('pb-expanded');
+      readMoreLink.textContent = expanded ? 'Read less \u25B2' : 'Read more \u25BC';
+    });
+
+    // Repo URL save — also auto-extracts repo name
     repoSaveBtn.addEventListener('click', function () {
-      saveRepoUrl(repoInput.value.trim());
-      addLog('Repo URL saved.');
+      var url = repoInput.value.trim();
+      saveRepoUrl(url);
+      var extracted = extractRepoName(url);
+      if (extracted) {
+        saveRepoName(extracted);
+        repoNameDisplay.textContent = 'Repo: ' + extracted;
+        addLog('Repo saved. Name: ' + extracted);
+      } else {
+        addLog('Repo URL saved.');
+      }
     });
 
     commitCheckbox.addEventListener('change', function () {
       saveAutoCommit(commitCheckbox.checked);
       addLog('Auto-commit ' + (commitCheckbox.checked ? 'enabled' : 'disabled') + '.');
-    });
-
-    // Repo Name save
-    repoNameSaveBtn.addEventListener('click', function () {
-      saveRepoName(repoNameInput.value.trim());
-      addLog('Repo name saved: ' + repoNameInput.value.trim());
-    });
-
-    // Auto-extract repo name when saving repo URL
-    repoSaveBtn.addEventListener('click', function () {
-      var url = repoInput.value.trim();
-      var extracted = extractRepoName(url);
-      if (extracted && !repoNameInput.value.trim()) {
-        repoNameInput.value = extracted;
-        saveRepoName(extracted);
-        addLog('Auto-extracted repo name: ' + extracted);
-      }
-    });
-
-    // Also auto-extract on URL input blur
-    repoInput.addEventListener('blur', function () {
-      var url = repoInput.value.trim();
-      var extracted = extractRepoName(url);
-      if (extracted && !repoNameInput.value.trim()) {
-        repoNameInput.value = extracted;
-        saveRepoName(extracted);
-      }
-    });
-
-    // Auto-select repo checkbox
-    selectRepoCheckbox.addEventListener('change', function () {
-      saveAutoSelectRepo(selectRepoCheckbox.checked);
-      addLog('Auto-select repo ' + (selectRepoCheckbox.checked ? 'enabled' : 'disabled') + '.');
     });
 
     // Build Name save
@@ -1230,6 +1386,17 @@
       saveState();
       refreshUI();
       addLog('Runner started.');
+
+      // Schedule delayed conversation rename (~30s after start)
+      if (renameTimer) clearTimeout(renameTimer);
+      var buildName = getBuildName();
+      var rName = getRepoName();
+      if (buildName || rName) {
+        renameTimer = setTimeout(function () {
+          renameConversation(buildName || ('Phase Build - ' + rName));
+        }, RENAME_DELAY);
+      }
+
       runCurrentPhase();
     });
 
@@ -1300,12 +1467,12 @@
     };
     statusTextEl.textContent = labels[runnerState] || runnerState;
     var colors = {
-      idle: '#e0e0e0',
+      idle: '#fff',
       running: '#da7757',
       paused: '#ff9800',
       complete: '#4caf50'
     };
-    statusTextEl.style.color = colors[runnerState] || '#e0e0e0';
+    statusTextEl.style.color = colors[runnerState] || '#fff';
 
     if (phaseCountEl) {
       var current = Math.min(currentPhaseIndex + 1, phases.length);
