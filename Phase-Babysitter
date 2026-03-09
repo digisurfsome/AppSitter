@@ -8,7 +8,8 @@
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @match        https://gemini.google.com/*
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      api.github.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -28,7 +29,9 @@
     state: 'pb-state',
     panelOpen: 'pb-panel-open',
     autoCommit: 'pb-auto-commit',
-    zoom: 'pb-zoom'
+    zoom: 'pb-zoom',
+    githubToken: 'pb_github_token',
+    githubUser: 'pb_github_user'
   };
 
   var IDLE_THRESHOLD = 5000;
@@ -42,6 +45,13 @@
   var AUTO_COMMIT_MSG = 'All phases are now complete. Please commit all your changes with a clear, descriptive commit message summarizing what was done, then push to your current branch. Use: git add -A && git commit -m "your message" && git push';
 
   var PHASE_COMMIT_FOOTER = '\n\nIMPORTANT: When you are finished with this task, commit all changes with a clear, descriptive commit message and push to your current branch. Do NOT write a summary or review in the chat after you are done — put your summary inside the commit message instead. Just commit, push, and stop.';
+
+  var BOILERPLATES = {
+    web: { owner: 'digisurfsome', repo: 'Web-BoilerPlate-D2D', label: 'Web App' },
+    mobile: { owner: 'digisurfsome', repo: 'Mobile-BoilerPlate-D2D', label: 'Mobile App (Coming Soon)', disabled: true },
+    both: { label: 'Both (Coming Soon)', disabled: true },
+    none: { owner: null, repo: null, label: 'No Boilerplate' }
+  };
 
   var REPO_SELECT_TIMEOUT = 500;
   var REPO_SEARCH_DELAY = 800;
@@ -346,6 +356,33 @@
 
   function saveZoom(val) {
     localStorage.setItem(STORAGE.zoom, String(val));
+  }
+
+  function getGitHubToken() { return localStorage.getItem(STORAGE.githubToken) || ''; }
+  function saveGitHubToken(t) { localStorage.setItem(STORAGE.githubToken, t); }
+  function getGitHubUser() { return localStorage.getItem(STORAGE.githubUser) || ''; }
+  function saveGitHubUser(u) { localStorage.setItem(STORAGE.githubUser, u); }
+
+  // ---- GM_xmlhttpRequest wrapper (cross-origin fetch via Tampermonkey) ----
+
+  function gmFetch(url, options) {
+    return new Promise(function (resolve, reject) {
+      GM_xmlhttpRequest({
+        method: options.method || 'GET',
+        url: url,
+        headers: options.headers || {},
+        data: options.body || null,
+        onload: function (resp) {
+          resolve({
+            ok: resp.status >= 200 && resp.status < 300,
+            status: resp.status,
+            json: function () { return Promise.resolve(JSON.parse(resp.responseText)); },
+            text: function () { return Promise.resolve(resp.responseText); }
+          });
+        },
+        onerror: function (err) { reject(err); }
+      });
+    });
   }
 
   function extractRepoName(url) {
@@ -1017,7 +1054,30 @@
       '}',
       '',
       '.pb-repo-row { display:flex;gap:6px;align-items:center; }',
-      '.pb-repo-row .pb-input { flex:1; }'
+      '.pb-repo-row .pb-input { flex:1; }',
+      '',
+      '.pb-toggle-group {',
+      '  display:flex;gap:0;margin-top:4px;',
+      '}',
+      '.pb-toggle-group .pb-btn {',
+      '  border-radius:0;flex:1;text-align:center;',
+      '}',
+      '.pb-toggle-group .pb-btn:first-child {',
+      '  border-radius:5px 0 0 5px;',
+      '}',
+      '.pb-toggle-group .pb-btn:last-child {',
+      '  border-radius:0 5px 5px 0;',
+      '}',
+      '.pb-token-display {',
+      '  display:flex;align-items:center;gap:8px;padding:6px 8px;',
+      '  background:#262624;border-radius:4px;font-size:11px;',
+      '}',
+      '.pb-token-mask {',
+      '  color:#e0e0e0;font-family:"SF Mono","Fira Code",Consolas,monospace;flex:1;',
+      '}',
+      '.pb-token-user {',
+      '  color:#4caf50;font-size:10px;font-weight:600;',
+      '}'
     ].join('\n');
     document.head.appendChild(style);
   }
@@ -1113,6 +1173,152 @@
     // -- Scrollable body --
     var body = document.createElement('div');
     body.className = 'pb-body';
+
+    // ============================================================
+    // Section A: GitHub Token
+    // ============================================================
+    var tokenSection = document.createElement('div');
+    tokenSection.className = 'pb-section';
+    var tokenTitle = document.createElement('div');
+    tokenTitle.className = 'pb-section-title';
+    tokenTitle.textContent = 'GitHub Token';
+    tokenSection.appendChild(tokenTitle);
+
+    // Container that swaps between input mode and display mode
+    var tokenInputContainer = document.createElement('div');
+    var tokenDisplayContainer = document.createElement('div');
+
+    // -- Input mode --
+    var tokenInputRow = document.createElement('div');
+    tokenInputRow.className = 'pb-repo-row';
+    var tokenInput = document.createElement('input');
+    tokenInput.className = 'pb-input';
+    tokenInput.type = 'password';
+    tokenInput.placeholder = 'ghp_xxxxxxxxxxxx';
+    var tokenSaveBtn = document.createElement('button');
+    tokenSaveBtn.className = 'pb-btn';
+    tokenSaveBtn.textContent = 'Save';
+    tokenInputRow.appendChild(tokenInput);
+    tokenInputRow.appendChild(tokenSaveBtn);
+    tokenInputContainer.appendChild(tokenInputRow);
+
+    // -- Display mode --
+    var tokenDispRow = document.createElement('div');
+    tokenDispRow.className = 'pb-token-display';
+    var tokenMask = document.createElement('span');
+    tokenMask.className = 'pb-token-mask';
+    var tokenUserSpan = document.createElement('span');
+    tokenUserSpan.className = 'pb-token-user';
+    var tokenChangeBtn = document.createElement('button');
+    tokenChangeBtn.className = 'pb-btn';
+    tokenChangeBtn.style.cssText = 'padding:3px 8px;font-size:10px;';
+    tokenChangeBtn.textContent = 'Change';
+    tokenDispRow.appendChild(tokenMask);
+    tokenDispRow.appendChild(tokenChangeBtn);
+    tokenDisplayContainer.appendChild(tokenDispRow);
+    tokenDisplayContainer.appendChild(tokenUserSpan);
+
+    // Show correct mode on load
+    var existingToken = getGitHubToken();
+    var existingUser = getGitHubUser();
+    if (existingToken) {
+      tokenMask.textContent = existingToken.substring(0, 4) + '****...' + existingToken.slice(-4);
+      tokenUserSpan.textContent = existingUser ? 'Authenticated as: ' + existingUser : '';
+      tokenUserSpan.style.cssText = 'display:block;margin-top:4px;';
+      tokenInputContainer.style.display = 'none';
+      tokenDisplayContainer.style.display = 'block';
+    } else {
+      tokenInputContainer.style.display = 'block';
+      tokenDisplayContainer.style.display = 'none';
+    }
+
+    tokenSection.appendChild(tokenInputContainer);
+    tokenSection.appendChild(tokenDisplayContainer);
+
+    // Read more help
+    var tokenReadMore = document.createElement('span');
+    tokenReadMore.className = 'pb-readmore';
+    tokenReadMore.textContent = 'Read more \u25BC';
+    tokenReadMore.style.marginTop = '6px';
+    tokenSection.appendChild(tokenReadMore);
+
+    var tokenHelpInfo = document.createElement('div');
+    tokenHelpInfo.className = 'pb-github-info';
+    tokenHelpInfo.textContent = 'Create a Personal Access Token at github.com \u2192 Settings \u2192 Developer settings \u2192 Personal access tokens \u2192 Fine-grained tokens. Grant "Contents" read/write and "Administration" read/write on your repos.';
+    tokenSection.appendChild(tokenHelpInfo);
+
+    body.appendChild(tokenSection);
+
+    // ============================================================
+    // Section B: Create New App
+    // ============================================================
+    var createSection = document.createElement('div');
+    createSection.className = 'pb-section';
+    var createTitle = document.createElement('div');
+    createTitle.className = 'pb-section-title';
+    createTitle.textContent = 'Create New App';
+    createSection.appendChild(createTitle);
+
+    // App Name
+    var appNameInput = document.createElement('input');
+    appNameInput.className = 'pb-input';
+    appNameInput.type = 'text';
+    appNameInput.placeholder = 'my-awesome-app';
+    createSection.appendChild(appNameInput);
+
+    // Visibility toggle
+    var visLabel = document.createElement('div');
+    visLabel.className = 'pb-section-title';
+    visLabel.style.marginTop = '8px';
+    visLabel.textContent = 'Visibility';
+    createSection.appendChild(visLabel);
+
+    var visToggle = document.createElement('div');
+    visToggle.className = 'pb-toggle-group';
+    var visPrivateBtn = document.createElement('button');
+    visPrivateBtn.className = 'pb-btn pb-btn-primary';
+    visPrivateBtn.textContent = 'Private';
+    var visPublicBtn = document.createElement('button');
+    visPublicBtn.className = 'pb-btn';
+    visPublicBtn.textContent = 'Public';
+    visToggle.appendChild(visPrivateBtn);
+    visToggle.appendChild(visPublicBtn);
+    createSection.appendChild(visToggle);
+    var isPrivate = true;
+
+    // Boilerplate select
+    var bpLabel = document.createElement('div');
+    bpLabel.className = 'pb-section-title';
+    bpLabel.style.marginTop = '8px';
+    bpLabel.textContent = 'Boilerplate';
+    createSection.appendChild(bpLabel);
+
+    var bpSelect = document.createElement('select');
+    bpSelect.className = 'pb-input';
+    var bpKeys = Object.keys(BOILERPLATES);
+    for (var bi = 0; bi < bpKeys.length; bi++) {
+      var bpKey = bpKeys[bi];
+      var bp = BOILERPLATES[bpKey];
+      var opt = document.createElement('option');
+      opt.value = bpKey;
+      opt.textContent = bp.label;
+      if (bp.disabled) opt.disabled = true;
+      if (bpKey === 'web') opt.selected = true;
+      bpSelect.appendChild(opt);
+    }
+    createSection.appendChild(bpSelect);
+
+    // Create button
+    var createBtnRow = document.createElement('div');
+    createBtnRow.className = 'pb-btn-row';
+    var createAppBtn = document.createElement('button');
+    createAppBtn.className = 'pb-btn pb-btn-primary';
+    createAppBtn.textContent = 'Create App';
+    createAppBtn.disabled = !existingToken;
+    createBtnRow.appendChild(createAppBtn);
+    createSection.appendChild(createBtnRow);
+
+    body.appendChild(createSection);
 
     // Section: GitHub Repo
     var repoSection = document.createElement('div');
@@ -1341,6 +1547,167 @@
     buildNameSaveBtn.addEventListener('click', function () {
       saveBuildName(buildNameInput.value.trim());
       addLog('Build name saved: ' + buildNameInput.value.trim());
+    });
+
+    // ---- Token section handlers ----
+
+    tokenReadMore.addEventListener('click', function () {
+      var expanded = tokenHelpInfo.classList.toggle('pb-expanded');
+      tokenReadMore.textContent = expanded ? 'Read less \u25B2' : 'Read more \u25BC';
+    });
+
+    tokenSaveBtn.addEventListener('click', function () {
+      var token = tokenInput.value.trim();
+      if (!token) { addLog('Enter a token first.'); return; }
+      tokenSaveBtn.disabled = true;
+      tokenSaveBtn.textContent = 'Verifying...';
+      gmFetch('https://api.github.com/user', {
+        method: 'GET',
+        headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' }
+      }).then(function (resp) {
+        if (!resp.ok) {
+          addLog('Token verification failed: ' + resp.status);
+          tokenSaveBtn.disabled = false;
+          tokenSaveBtn.textContent = 'Save';
+          return;
+        }
+        return resp.json().then(function (data) {
+          saveGitHubToken(token);
+          saveGitHubUser(data.login);
+          tokenMask.textContent = token.substring(0, 4) + '****...' + token.slice(-4);
+          tokenUserSpan.textContent = 'Authenticated as: ' + data.login;
+          tokenUserSpan.style.cssText = 'display:block;margin-top:4px;';
+          tokenInputContainer.style.display = 'none';
+          tokenDisplayContainer.style.display = 'block';
+          tokenInput.value = '';
+          createAppBtn.disabled = false;
+          addLog('GitHub token saved. Authenticated as: ' + data.login);
+          tokenSaveBtn.disabled = false;
+          tokenSaveBtn.textContent = 'Save';
+        });
+      }).catch(function () {
+        addLog('Token verification failed: network error');
+        tokenSaveBtn.disabled = false;
+        tokenSaveBtn.textContent = 'Save';
+      });
+    });
+
+    tokenChangeBtn.addEventListener('click', function () {
+      tokenInputContainer.style.display = 'block';
+      tokenDisplayContainer.style.display = 'none';
+    });
+
+    // ---- Create App section handlers ----
+
+    // Auto-slugify on blur
+    appNameInput.addEventListener('blur', function () {
+      appNameInput.value = appNameInput.value.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9\-]/g, '');
+    });
+
+    // Update create button disabled state on input
+    appNameInput.addEventListener('input', function () {
+      createAppBtn.disabled = !getGitHubToken() || !appNameInput.value.trim();
+    });
+
+    // Visibility toggle
+    visPrivateBtn.addEventListener('click', function () {
+      isPrivate = true;
+      visPrivateBtn.className = 'pb-btn pb-btn-primary';
+      visPublicBtn.className = 'pb-btn';
+    });
+    visPublicBtn.addEventListener('click', function () {
+      isPrivate = false;
+      visPublicBtn.className = 'pb-btn pb-btn-primary';
+      visPrivateBtn.className = 'pb-btn';
+    });
+
+    // Create App
+    createAppBtn.addEventListener('click', function () {
+      var appName = appNameInput.value.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9\-]/g, '');
+      if (!appName) { addLog('Enter an app name.'); return; }
+      var token = getGitHubToken();
+      if (!token) { addLog('Save a GitHub token first.'); return; }
+      var ghUser = getGitHubUser();
+      if (!ghUser) { addLog('No GitHub user found. Re-save your token.'); return; }
+
+      appNameInput.value = appName;
+      createAppBtn.disabled = true;
+      createAppBtn.textContent = 'Creating...';
+      appNameInput.disabled = true;
+      visPrivateBtn.disabled = true;
+      visPublicBtn.disabled = true;
+      bpSelect.disabled = true;
+
+      var bpKey = bpSelect.value;
+      var bp = BOILERPLATES[bpKey];
+      var apiUrl, reqBody;
+
+      if (bp && bp.owner && bp.repo) {
+        // Template repo API
+        apiUrl = 'https://api.github.com/repos/' + bp.owner + '/' + bp.repo + '/generate';
+        reqBody = JSON.stringify({
+          owner: ghUser,
+          name: appName,
+          'private': isPrivate,
+          description: 'Created by AppSitter'
+        });
+      } else {
+        // Regular create repo API
+        apiUrl = 'https://api.github.com/user/repos';
+        reqBody = JSON.stringify({
+          name: appName,
+          'private': isPrivate,
+          auto_init: true,
+          description: 'Created by AppSitter'
+        });
+      }
+
+      gmFetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + token,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json'
+        },
+        body: reqBody
+      }).then(function (resp) {
+        if (!resp.ok) {
+          return resp.json().then(function (errData) {
+            var msg = 'Failed to create repo: ' + resp.status;
+            if (resp.status === 401) msg = 'Invalid token';
+            else if (resp.status === 422) msg = 'Repo name already exists';
+            else if (resp.status === 403) msg = 'Token lacks required permissions';
+            else if (errData && errData.message) msg += ' ' + errData.message;
+            addLog(msg);
+          }).catch(function () {
+            addLog('Failed to create repo: ' + resp.status);
+          });
+        }
+        return resp.json().then(function (data) {
+          var newUrl = 'https://github.com/' + ghUser + '/' + appName;
+          // Auto-fill existing repo section
+          repoInput.value = newUrl;
+          saveRepoUrl(newUrl);
+          var extracted = extractRepoName(newUrl);
+          if (extracted) {
+            saveRepoName(extracted);
+            repoNameDisplay.textContent = 'Repo: ' + extracted;
+          }
+          var bpLabel = (bp && bp.owner) ? bp.label + ' boilerplate' : 'no boilerplate';
+          addLog('Created repo: ' + ghUser + '/' + appName + ' with ' + bpLabel);
+          appNameInput.value = '';
+        });
+      }).catch(function (err) {
+        addLog('Failed to create repo: network error');
+      }).then(function () {
+        // Always re-enable
+        createAppBtn.disabled = false;
+        createAppBtn.textContent = 'Create App';
+        appNameInput.disabled = false;
+        visPrivateBtn.disabled = false;
+        visPublicBtn.disabled = false;
+        bpSelect.disabled = false;
+      });
     });
 
     parseBtn.addEventListener('click', function () {
