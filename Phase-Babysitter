@@ -24,7 +24,8 @@
     currentPhase: 'pb-current-phase',
     repoUrl: 'pb-repo-url',
     state: 'pb-state',
-    panelOpen: 'pb-panel-open'
+    panelOpen: 'pb-panel-open',
+    autoCommit: 'pb-auto-commit'
   };
 
   var IDLE_THRESHOLD = 5000;
@@ -34,6 +35,8 @@
   var SEND_RETRY_DELAY = 600;
   var SEND_MAX_RETRIES = 4;
   var PHASE_MARKER_RE = /---\s*PHASE\s+(\d+)\s*---/gi;
+
+  var AUTO_COMMIT_MSG = 'All phases are now complete. Please commit all your changes with a clear, descriptive commit message summarizing what was done, then push to your current branch. Use: git add -A && git commit -m "your message" && git push';
 
   // ============================================================
   // STATE
@@ -300,6 +303,14 @@
     localStorage.setItem(STORAGE.repoUrl, url);
   }
 
+  function getAutoCommit() {
+    return localStorage.getItem(STORAGE.autoCommit) === 'true';
+  }
+
+  function saveAutoCommit(val) {
+    localStorage.setItem(STORAGE.autoCommit, val ? 'true' : 'false');
+  }
+
   // ============================================================
   // PHASE PARSING & VARIABLES
   // ============================================================
@@ -342,12 +353,38 @@
   // PHASE RUNNER
   // ============================================================
 
+  function sendAutoCommit() {
+    addLog('Auto-commit enabled. Sending commit instruction...');
+    var repoUrl = getRepoUrl();
+    var commitText = AUTO_COMMIT_MSG;
+    if (repoUrl) {
+      commitText += '\n\nRepository: ' + repoUrl;
+    }
+    var injected = injectText(commitText);
+    if (!injected) {
+      addLog('ERROR: Could not inject commit message. No chat input found.');
+      return;
+    }
+    setTimeout(function () {
+      attemptSend(SEND_MAX_RETRIES, function (sent) {
+        if (sent) {
+          addLog('Commit instruction sent successfully.');
+        } else {
+          addLog('WARNING: Could not auto-send commit instruction. Please click Send manually.');
+        }
+      });
+    }, 500);
+  }
+
   function runCurrentPhase() {
     if (currentPhaseIndex >= phases.length) {
       runnerState = 'complete';
       saveState();
       refreshUI();
       addLog('All phases complete!');
+      if (getAutoCommit()) {
+        setTimeout(function () { sendAutoCommit(); }, INTER_PHASE_DELAY);
+      }
       return;
     }
     if (runnerState !== 'running') return;
@@ -662,6 +699,27 @@
     repoHint.className = 'pb-hint';
     repoHint.textContent = 'Use {{REPO_URL}} in your phases to auto-insert this URL.';
     repoSection.appendChild(repoHint);
+
+    // Auto-commit checkbox
+    var commitRow = document.createElement('div');
+    commitRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:8px;border-top:1px solid #333;';
+    var commitCheckbox = document.createElement('input');
+    commitCheckbox.type = 'checkbox';
+    commitCheckbox.id = 'pb-auto-commit';
+    commitCheckbox.checked = getAutoCommit();
+    commitCheckbox.style.cssText = 'accent-color:#da7757;width:14px;height:14px;cursor:pointer;';
+    var commitLabel = document.createElement('label');
+    commitLabel.htmlFor = 'pb-auto-commit';
+    commitLabel.style.cssText = 'color:#e0e0e0;font-size:11px;cursor:pointer;font-weight:600;';
+    commitLabel.textContent = 'Auto-commit when all phases complete';
+    commitRow.appendChild(commitCheckbox);
+    commitRow.appendChild(commitLabel);
+    repoSection.appendChild(commitRow);
+    var commitHint = document.createElement('div');
+    commitHint.className = 'pb-hint';
+    commitHint.textContent = 'When enabled, sends a "commit & push" instruction to the agent after all phases finish.';
+    repoSection.appendChild(commitHint);
+
     body.appendChild(repoSection);
 
     // Section: Phase Input
@@ -752,6 +810,11 @@
     repoSaveBtn.addEventListener('click', function () {
       saveRepoUrl(repoInput.value.trim());
       addLog('Repo URL saved.');
+    });
+
+    commitCheckbox.addEventListener('change', function () {
+      saveAutoCommit(commitCheckbox.checked);
+      addLog('Auto-commit ' + (commitCheckbox.checked ? 'enabled' : 'disabled') + '.');
     });
 
     parseBtn.addEventListener('click', function () {
