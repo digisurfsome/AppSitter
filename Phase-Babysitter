@@ -499,6 +499,106 @@
   // REPO DROPDOWN SELECTION (Claude Code Web)
   // ============================================================
 
+  function startNewSession(callback) {
+    // Navigate to a fresh Claude Code session by clicking "New chat" or "+" button
+    addLog('Starting new session...');
+    var urlBefore = window.location.href;
+
+    // Strategy 1: Find explicit "New chat" or "+" button
+    var newChatBtn = null;
+    var candidates = document.querySelectorAll('button, a, [role="button"]');
+    for (var i = 0; i < candidates.length; i++) {
+      var el = candidates[i];
+      if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
+      var rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+
+      var text = (el.textContent || '').trim().toLowerCase();
+      var label = (el.getAttribute('aria-label') || '').toLowerCase();
+      var title = (el.getAttribute('title') || '').toLowerCase();
+
+      // Match "New chat", "New conversation", "+" button near top area
+      if (text === '+' || text === 'new chat' || text === 'new conversation' ||
+          label.indexOf('new chat') !== -1 || label.indexOf('new conversation') !== -1 ||
+          title.indexOf('new chat') !== -1 || title.indexOf('new conversation') !== -1) {
+        newChatBtn = el;
+        addLog('Found new chat button: "' + (text || label || title).substring(0, 30) + '"');
+        break;
+      }
+    }
+
+    // Strategy 2: Find "+" button in the sidebar tabs area (near repo tabs)
+    if (!newChatBtn) {
+      var plusBtns = document.querySelectorAll('button, [role="button"]');
+      for (var j = 0; j < plusBtns.length; j++) {
+        var btn = plusBtns[j];
+        if (btn.closest('#pb-panel') || btn.closest('#pb-toggle')) continue;
+        var brect = btn.getBoundingClientRect();
+        // Look for small buttons in the sidebar area (left side, near top)
+        if (brect.left < 300 && brect.top < 200 && brect.width > 0 && brect.width < 60) {
+          var btnText = (btn.textContent || '').trim();
+          // Look for "+" or icons with new-chat semantics
+          if (btnText === '+' || btnText === '') {
+            // Check for SVG icon (common for icon-only buttons)
+            var hasSvg = btn.querySelector('svg');
+            if (btnText === '+' || hasSvg) {
+              newChatBtn = btn;
+              addLog('Found "+" button in sidebar area');
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (!newChatBtn) {
+      addLog('WARNING: Could not find New Chat button. Will try injection in current view.');
+      if (callback) callback();
+      return;
+    }
+
+    newChatBtn.click();
+    addLog('Clicked New Chat button.');
+
+    // Poll for the new session view to appear (URL change + "Ask Claude" input)
+    var pollCount = 0;
+    var POLL_MAX = 20;
+    var POLL_INTERVAL = 500;
+
+    function waitForNewView() {
+      pollCount++;
+      var urlNow = window.location.href;
+      var urlChanged = urlNow !== urlBefore;
+      var editor = getEditor();
+      var hasNewSessionInput = false;
+
+      if (editor) {
+        var ph = (editor.el.getAttribute('data-placeholder') || '').toLowerCase();
+        hasNewSessionInput = ph.indexOf('ask') !== -1 || ph.indexOf('write') !== -1 || ph.indexOf('claude') !== -1;
+        // Also accept any editor if URL changed (new session confirmed by URL)
+        if (!hasNewSessionInput && urlChanged) hasNewSessionInput = true;
+      }
+
+      if (hasNewSessionInput) {
+        addLog('New session view ready.');
+        setTimeout(function () {
+          if (callback) callback();
+        }, 1000);
+        return;
+      }
+
+      if (pollCount >= POLL_MAX) {
+        addLog('WARNING: Timed out waiting for new session view. Proceeding.');
+        if (callback) callback();
+        return;
+      }
+
+      setTimeout(waitForNewView, POLL_INTERVAL);
+    }
+
+    setTimeout(waitForNewView, 500);
+  }
+
   function selectRepoInDropdown(repoName, callback) {
     if (!repoName) {
       addLog('No repo name set. Skipping repo selection.');
@@ -513,6 +613,14 @@
 
     addLog('Selecting repo: ' + repoName + '...');
 
+    // STEP 0: Start a new session first, then select the repo
+    startNewSession(function () {
+      // Now we're in the new session "Ask Claude to write code..." view
+      selectRepoAfterNewSession(repoName, callback);
+    });
+  }
+
+  function selectRepoAfterNewSession(repoName, callback) {
     // Step 1: Find the repo selector button in the top-left area
     // Claude Code Web shows the repo name in a clickable button near the top-left
     var repoBtn = null;
@@ -552,7 +660,7 @@
     }
 
     if (!repoBtn) {
-      addLog('WARNING: Could not find repo selector button. Skipping.');
+      addLog('WARNING: Could not find repo selector button. Skipping repo selection.');
       if (callback) callback();
       return;
     }
@@ -669,40 +777,13 @@
           return;
         }
 
-        // After clicking a repo, Claude Code Web navigates to a new conversation.
-        // We must wait for the URL to change and the new chat input to be ready.
-        var urlBefore = window.location.href;
-        var navPollCount = 0;
-        var NAV_POLL_MAX = 30; // up to 15 seconds
-        var NAV_POLL_INTERVAL = 500;
-
-        function waitForNewSession() {
-          navPollCount++;
-          var urlNow = window.location.href;
-          var urlChanged = urlNow !== urlBefore;
-          var hasEditor = !!getEditor();
-
-          if (urlChanged && hasEditor) {
-            addLog('New session detected. URL: ' + urlNow.substring(urlNow.lastIndexOf('/') + 1).substring(0, 20) + '...');
-            // Wait for editor to fully initialize — new session inputs take time
-            setTimeout(function () {
-              addLog('New session settled. Proceeding with injection.');
-              if (callback) callback();
-            }, 2500); // 2.5s buffer for UI to fully settle
-            return;
-          }
-
-          if (navPollCount >= NAV_POLL_MAX) {
-            addLog('WARNING: Timed out waiting for new session. Proceeding anyway.');
-            if (callback) callback();
-            return;
-          }
-
-          setTimeout(waitForNewSession, NAV_POLL_INTERVAL);
-        }
-
-        // Start polling after a short initial delay
-        setTimeout(waitForNewSession, REPO_CLICK_DELAY);
+        // After selecting repo, wait briefly for UI to settle, then proceed
+        // The repo selection just changes context — we're already in the new session
+        addLog('Repo selected. Waiting for UI to settle...');
+        setTimeout(function () {
+          addLog('Ready for injection.');
+          if (callback) callback();
+        }, 2000);
       }, REPO_SEARCH_DELAY);
     }, REPO_SELECT_TIMEOUT);
   }
