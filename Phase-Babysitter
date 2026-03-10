@@ -1184,7 +1184,7 @@
               }, INTER_PHASE_DELAY);
             });
           }, POST_SEND_DELAY);
-        });
+        }, useNewSession);
       }, 500);
     }
 
