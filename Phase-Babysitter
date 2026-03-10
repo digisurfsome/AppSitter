@@ -302,7 +302,7 @@
           }
         }
       }
-      // Fallback: find any button physically near the sidebar input (within ~100px)
+      // Fallback: find any button physically near the sidebar input
       // The send button on Claude is an orange circle with an arrow SVG right next to the textarea
       if (!btn) {
         var ed2 = getEditor(true);
@@ -313,7 +313,7 @@
           var closestDist = Infinity;
           for (var b = 0; b < allBtns.length; b++) {
             var ab = allBtns[b];
-            if (ab.disabled || ab.closest('#pb-panel') || ab.closest('#pb-toggle')) continue;
+            if (ab.closest('#pb-panel') || ab.closest('#pb-toggle')) continue;
             var abRect = ab.getBoundingClientRect();
             if (abRect.width === 0 || abRect.height === 0) continue;
             // Button must be near the editor vertically and to the right or overlapping
@@ -333,7 +333,11 @@
           }
           if (closestBtn) {
             btn = closestBtn;
-            addLog('Found send button near sidebar input (proximity match).');
+            addLog('Found send button near sidebar input (proximity match, disabled=' + closestBtn.disabled + ').');
+          } else {
+            addLog('DEBUG: No button found near editor. Editor rect: left=' + Math.round(edRect.left) +
+                   ' top=' + Math.round(edRect.top) + ' right=' + Math.round(edRect.right) +
+                   ' btns checked=' + allBtns.length);
           }
         }
       }
@@ -341,11 +345,25 @@
 
     if (!btn) {
       btn = findButtonFromMap(SEND_SELECTORS);
+      if (btn) {
+        addLog('DEBUG: Found send via selector map (disabled=' + btn.disabled + ').');
+      } else if (preferNewSession) {
+        addLog('DEBUG: No send button found at all. Will fall back to Enter.');
+      }
     }
 
     if (btn && !btn.disabled) {
       btn.click();
       addLog('Clicked send button' + (preferNewSession ? ' (new-session)' : '') + '.');
+      if (callback) callback(true);
+      return;
+    }
+    // If we found a button but it's disabled, try clicking it anyway for new-session
+    // (React may not have re-rendered yet after text injection)
+    if (btn && btn.disabled && preferNewSession) {
+      addLog('Send button found but disabled. Clicking anyway...');
+      btn.disabled = false;
+      btn.click();
       if (callback) callback(true);
       return;
     }
