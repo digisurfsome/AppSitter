@@ -60,6 +60,25 @@
   var RENAME_DELAY = 30000;
 
   // ============================================================
+  // ROBUST CLICK HELPER
+  // ============================================================
+
+  // Simulates a full mouse interaction sequence so React/Radix/etc. handlers fire
+  function robustClick(el) {
+    if (!el) return;
+    var rect = el.getBoundingClientRect();
+    var cx = rect.left + rect.width / 2;
+    var cy = rect.top + rect.height / 2;
+    var commonInit = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 0 };
+
+    el.dispatchEvent(new PointerEvent('pointerdown', commonInit));
+    el.dispatchEvent(new MouseEvent('mousedown', commonInit));
+    el.dispatchEvent(new PointerEvent('pointerup', commonInit));
+    el.dispatchEvent(new MouseEvent('mouseup', commonInit));
+    el.click();
+  }
+
+  // ============================================================
   // STATE
   // ============================================================
 
@@ -274,27 +293,37 @@
 
     // If targeting the new-session "Ask Claude" input, find the send button near it
     if (preferNewSession) {
+      // Strategy 1: Known selectors, allow disabled buttons too (we'll force-click)
       var selectors = SEND_SELECTORS[SITE] || [];
+      var enabledBtn = null;
+      var disabledBtn = null;
       for (var s = 0; s < selectors.length; s++) {
         var candidates = document.querySelectorAll(selectors[s]);
         for (var c = 0; c < candidates.length; c++) {
           var r = candidates[c].getBoundingClientRect();
           // The "Ask Claude" send button is near the top of the page
-          if (r.top < 200 && r.width > 0 && !candidates[c].disabled) {
-            btn = candidates[c];
-            break;
+          if (r.top < 200 && r.width > 0) {
+            if (!candidates[c].disabled) {
+              enabledBtn = candidates[c];
+              break;
+            } else if (!disabledBtn) {
+              disabledBtn = candidates[c];
+            }
           }
         }
-        if (btn) break;
+        if (enabledBtn) break;
       }
-      // Also look for a submit button in the same form/container as the editor
+      btn = enabledBtn || disabledBtn;
+
+      // Strategy 2: Look for a submit button in the same form/container as the editor
+      // (accept disabled buttons too)
       if (!btn) {
         var ed = getEditor(true);
         if (ed) {
           var parent = ed.el.closest('form') || ed.el.parentElement;
           while (parent && parent !== document.body) {
             var formBtn = parent.querySelector('button[type="submit"], button[aria-label*="Send" i]');
-            if (formBtn && !formBtn.disabled && !formBtn.closest('#pb-panel')) {
+            if (formBtn && !formBtn.closest('#pb-panel')) {
               btn = formBtn;
               break;
             }
@@ -302,8 +331,10 @@
           }
         }
       }
-      // Fallback: find any button physically near the sidebar input
-      // The send button on Claude is an orange circle with an arrow SVG right next to the textarea
+
+      // Strategy 3: Find any button physically near the sidebar input
+      // The send button on Claude is an orange circle with an arrow SVG
+      // It can be INSIDE, overlapping, or to the right of the textarea
       if (!btn) {
         var ed2 = getEditor(true);
         if (ed2) {
@@ -316,15 +347,19 @@
             if (ab.closest('#pb-panel') || ab.closest('#pb-toggle')) continue;
             var abRect = ab.getBoundingClientRect();
             if (abRect.width === 0 || abRect.height === 0) continue;
-            // Button must be near the editor vertically and to the right or overlapping
-            var vertDist = Math.abs((abRect.top + abRect.height / 2) - (edRect.top + edRect.height / 2));
-            var horizDist = abRect.left - (edRect.right);
-            // Within 100px vertically and 150px to the right of editor
-            if (vertDist < 100 && horizDist > -50 && horizDist < 150) {
+            // Button center relative to editor
+            var btnCX = abRect.left + abRect.width / 2;
+            var btnCY = abRect.top + abRect.height / 2;
+            var edCY = edRect.top + edRect.height / 2;
+            var vertDist = Math.abs(btnCY - edCY);
+            // Allow button to be overlapping/inside the editor (horizDist can be negative)
+            var horizDist = btnCX - (edRect.left + edRect.width / 2);
+            // Must be within 120px vertically and within the general area of the editor
+            if (vertDist < 120 && abRect.left < edRect.right + 200 && abRect.left > edRect.left - 50) {
               var dist = Math.sqrt(vertDist * vertDist + horizDist * horizDist);
               // Prefer buttons that contain SVG (icon buttons like send arrows)
               var hasSvg = ab.querySelector('svg');
-              var adjustedDist = hasSvg ? dist * 0.5 : dist;
+              var adjustedDist = hasSvg ? dist * 0.3 : dist;
               if (adjustedDist < closestDist) {
                 closestDist = adjustedDist;
                 closestBtn = ab;
@@ -353,18 +388,28 @@
     }
 
     if (btn && !btn.disabled) {
-      btn.click();
+      robustClick(btn);
       addLog('Clicked send button' + (preferNewSession ? ' (new-session)' : '') + '.');
       if (callback) callback(true);
       return;
     }
-    // If we found a button but it's disabled, try clicking it anyway for new-session
+    // If we found a button but it's disabled, force-enable and click it
     // (React may not have re-rendered yet after text injection)
-    if (btn && btn.disabled && preferNewSession) {
-      addLog('Send button found but disabled. Clicking anyway...');
+    if (btn && btn.disabled) {
+      addLog('Send button found but disabled. Force-enabling and clicking...');
       btn.disabled = false;
-      btn.click();
-      if (callback) callback(true);
+      btn.removeAttribute('disabled');
+      // Trigger React re-render by re-dispatching input event on editor
+      var edForRerender = getEditor(preferNewSession);
+      if (edForRerender) {
+        edForRerender.el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      // Small delay to let React process, then click
+      setTimeout(function () {
+        robustClick(btn);
+        addLog('Clicked send button (was disabled)' + (preferNewSession ? ' (new-session)' : '') + '.');
+        if (callback) callback(true);
+      }, 200);
       return;
     }
     // Fallback: Enter key on the correct editor
@@ -812,7 +857,7 @@
       return;
     }
 
-    repoBtn.click();
+    robustClick(repoBtn);
     addLog('Clicked repo dropdown.');
 
     // Step 2: Wait for dropdown to open, find the search input
@@ -888,7 +933,7 @@
           for (var i = 0; i < items.length; i++) {
             var itemText = items[i].textContent.trim().toLowerCase();
             if (itemText.indexOf(lowerName) !== -1 && !items[i].closest('#pb-panel')) {
-              items[i].click();
+              robustClick(items[i]);
               addLog('Selected repo: ' + repoName);
               found = true;
               break;
@@ -934,9 +979,31 @@
             }
           }
           if (bestMatch) {
-            bestMatch.click();
+            robustClick(bestMatch);
             addLog('Selected repo: ' + repoName + ' (fallback match: "' + bestMatch.textContent.trim().substring(0, 30) + '")');
             found = true;
+          }
+        }
+
+        // Second-chance fallback: if the above found nothing, look for any clickable
+        // row/item below the search input that visually contains the repo name.
+        // This time, prefer PARENT containers (the actual list row) over inner spans.
+        if (!found) {
+          var rowEls = document.querySelectorAll('a, button, [role="button"], li, div[tabindex], div[data-value]');
+          for (var r = 0; r < rowEls.length; r++) {
+            var row = rowEls[r];
+            if (row.closest('#pb-panel') || row.closest('#pb-toggle')) continue;
+            var rRect = row.getBoundingClientRect();
+            if (rRect.left < 400 && rRect.top > 40 && rRect.top < 500 &&
+                rRect.width > 50 && rRect.height > 15 && rRect.height < 100) {
+              var rowText = row.textContent.trim().toLowerCase();
+              if (rowText.indexOf(lowerName) !== -1 && rowText.length < 150) {
+                robustClick(row);
+                addLog('Selected repo: ' + repoName + ' (row fallback: "' + row.textContent.trim().substring(0, 30) + '")');
+                found = true;
+                break;
+              }
+            }
           }
         }
 
@@ -949,13 +1016,51 @@
           return;
         }
 
-        // After selecting repo, wait briefly for UI to settle, then proceed
-        // The repo selection just changes context — we're already in the new session
-        addLog('Repo selected. Waiting for UI to settle...');
+        // Verify the dropdown actually closed after clicking.
+        // If it's still open after 800ms, the click didn't register — retry by
+        // clicking the matched element again and then clicking body to close.
+        addLog('Repo selected. Verifying dropdown closed...');
         setTimeout(function () {
-          addLog('Ready for injection.');
-          if (callback) callback();
-        }, 2000);
+          // Check if dropdown/popover is still visible
+          var stillOpen = false;
+          var dropdownContainers = document.querySelectorAll(
+            '[role="listbox"], [role="dialog"]:not([aria-modal="true"]), [role="menu"], ' +
+            '[class*="dropdown"]:not(#pb-panel), [class*="popover"]:not(#pb-panel), [class*="popup"]:not(#pb-panel)'
+          );
+          for (var dc = 0; dc < dropdownContainers.length; dc++) {
+            var dcRect = dropdownContainers[dc].getBoundingClientRect();
+            if (dcRect.width > 0 && dcRect.height > 0 && dcRect.left < 400 && dcRect.top < 500) {
+              stillOpen = true;
+              break;
+            }
+          }
+          // Also check if the search input is still visible
+          if (!stillOpen && searchInput) {
+            var siRect = searchInput.getBoundingClientRect();
+            if (siRect.width > 0 && siRect.height > 0) {
+              stillOpen = true;
+            }
+          }
+          if (stillOpen) {
+            addLog('Dropdown still open — retrying click...');
+            // Try pressing Escape to close, then click body
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+            setTimeout(function () {
+              document.body.click();
+              addLog('Repo selected (forced close). Waiting for UI to settle...');
+              setTimeout(function () {
+                addLog('Ready for injection.');
+                if (callback) callback();
+              }, 1500);
+            }, 300);
+          } else {
+            addLog('Repo selected. Waiting for UI to settle...');
+            setTimeout(function () {
+              addLog('Ready for injection.');
+              if (callback) callback();
+            }, 1500);
+          }
+        }, 800);
       }, REPO_SEARCH_DELAY);
     }, REPO_SELECT_TIMEOUT);
   }
@@ -1159,6 +1264,9 @@
       var contentLen = editorAfter ? (editorAfter.el.textContent || '').length : 0;
       addLog('Text injected (' + contentLen + ' chars). Sending' + (useNewSession ? ' [new-session]' : '') + '...');
 
+      // Give React more time to process the text injection and enable the send button
+      // New-session mode needs extra time since the sidebar input is less responsive
+      var sendDelay = useNewSession ? 1200 : 500;
       setTimeout(function () {
         if (runnerState !== 'running') return;
 
@@ -1185,7 +1293,7 @@
             });
           }, POST_SEND_DELAY);
         });
-      }, 500);
+      }, sendDelay);
     }
 
     if (shouldSelectRepo) {
