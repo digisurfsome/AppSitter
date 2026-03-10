@@ -302,6 +302,41 @@
           }
         }
       }
+      // Fallback: find any button physically near the sidebar input (within ~100px)
+      // The send button on Claude is an orange circle with an arrow SVG right next to the textarea
+      if (!btn) {
+        var ed2 = getEditor(true);
+        if (ed2) {
+          var edRect = ed2.el.getBoundingClientRect();
+          var allBtns = document.querySelectorAll('button');
+          var closestBtn = null;
+          var closestDist = Infinity;
+          for (var b = 0; b < allBtns.length; b++) {
+            var ab = allBtns[b];
+            if (ab.disabled || ab.closest('#pb-panel') || ab.closest('#pb-toggle')) continue;
+            var abRect = ab.getBoundingClientRect();
+            if (abRect.width === 0 || abRect.height === 0) continue;
+            // Button must be near the editor vertically and to the right or overlapping
+            var vertDist = Math.abs((abRect.top + abRect.height / 2) - (edRect.top + edRect.height / 2));
+            var horizDist = abRect.left - (edRect.right);
+            // Within 100px vertically and 150px to the right of editor
+            if (vertDist < 100 && horizDist > -50 && horizDist < 150) {
+              var dist = Math.sqrt(vertDist * vertDist + horizDist * horizDist);
+              // Prefer buttons that contain SVG (icon buttons like send arrows)
+              var hasSvg = ab.querySelector('svg');
+              var adjustedDist = hasSvg ? dist * 0.5 : dist;
+              if (adjustedDist < closestDist) {
+                closestDist = adjustedDist;
+                closestBtn = ab;
+              }
+            }
+          }
+          if (closestBtn) {
+            btn = closestBtn;
+            addLog('Found send button near sidebar input (proximity match).');
+          }
+        }
+      }
     }
 
     if (!btn) {
@@ -844,21 +879,46 @@
           if (found) break;
         }
 
-        // Broader fallback: any clickable element in dropdown area matching the name
+        // Broader fallback: any visible element in the dropdown area that contains
+        // the repo name. The Claude dropdown items may be plain divs without roles
+        // or tabindex, so we scan ALL elements below the search input.
         if (!found) {
-          var clickables = document.querySelectorAll('a, button, [role="button"], div[tabindex], li, span[tabindex]');
-          for (var j = 0; j < clickables.length; j++) {
-            var cel = clickables[j];
+          var allDropdownEls = document.querySelectorAll('a, button, [role="button"], div, li, span, p');
+          var bestMatch = null;
+          var bestLen = Infinity;
+          for (var j = 0; j < allDropdownEls.length; j++) {
+            var cel = allDropdownEls[j];
+            if (cel.closest('#pb-panel') || cel.closest('#pb-toggle')) continue;
             var crect = cel.getBoundingClientRect();
-            if (crect.left < 400 && crect.top > 40 && crect.top < 400 && crect.width > 0) {
+            // Must be in the dropdown area: left side, below the repo button, visible
+            if (crect.left < 400 && crect.top > 40 && crect.top < 500 &&
+                crect.width > 30 && crect.height > 10 && crect.height < 80) {
               var celText = cel.textContent.trim().toLowerCase();
-              if (celText.indexOf(lowerName) !== -1 && celText.length < 100 && !cel.closest('#pb-panel')) {
-                cel.click();
-                addLog('Selected repo: ' + repoName);
-                found = true;
-                break;
+              // Match: text contains repo name, is reasonably short, and prefer
+              // the most specific (shortest) match to avoid clicking a parent container
+              if (celText.indexOf(lowerName) !== -1 && celText.length < 100 && celText.length < bestLen) {
+                // Make sure this element doesn't have a child that also matches
+                // (we want the innermost/most specific element)
+                var childMatch = false;
+                var children = cel.children;
+                for (var ch = 0; ch < children.length; ch++) {
+                  var childText = children[ch].textContent.trim().toLowerCase();
+                  if (childText.indexOf(lowerName) !== -1 && childText.length < 100) {
+                    childMatch = true;
+                    break;
+                  }
+                }
+                if (!childMatch) {
+                  bestMatch = cel;
+                  bestLen = celText.length;
+                }
               }
             }
+          }
+          if (bestMatch) {
+            bestMatch.click();
+            addLog('Selected repo: ' + repoName + ' (fallback match: "' + bestMatch.textContent.trim().substring(0, 30) + '")');
+            found = true;
           }
         }
 
@@ -1142,7 +1202,7 @@
     ].join('');
 
     var msg = document.createElement('div');
-    msg.style.cssText = 'color:#da7757;font-size:18px;font-weight:bold;margin-bottom:16px;text-align:center;font-family:system-ui,sans-serif;';
+    msg.style.cssText = 'color:#da7757;font-size:54px;font-weight:bold;margin-bottom:16px;text-align:center;font-family:system-ui,sans-serif;';
     msg.textContent = message || 'Refreshing page...';
 
     var countdown = document.createElement('div');
