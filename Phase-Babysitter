@@ -58,6 +58,7 @@
   var REPO_SEARCH_DELAY = 800;
   var REPO_CLICK_DELAY = 500;
   var RENAME_DELAY = 30000;
+  var STORAGE_PREFIX = 'pb-';
 
   // ============================================================
   // ROBUST CLICK HELPER
@@ -626,8 +627,7 @@
       var c = localStorage.getItem(STORAGE.currentPhase);
       if (c !== null) currentPhaseIndex = parseInt(c, 10);
       var s = localStorage.getItem(STORAGE.state);
-      if (s && s !== 'running') runnerState = s;
-      if (s === 'running') runnerState = 'paused';
+      if (s) runnerState = s;
     } catch (_) {}
   }
 
@@ -2740,8 +2740,120 @@
         loadState();
         injectStyles();
         buildUI();
+        setupSPANavigationDetection();
+        // Auto-resume: if state was 'running' when we loaded, restart completion detection
+        if (runnerState === 'running') {
+          addLog('Auto-resuming after page navigation. Re-attaching to conversation...');
+          autoResumeAfterNavigation();
+        }
       }
     }, 200);
+  }
+
+  // ============================================================
+  // SPA NAVIGATION DETECTION
+  // ============================================================
+  // Claude.ai is a single-page app — URL changes happen via History API
+  // without full page reloads. We need to detect these navigations so we
+  // can re-attach our MutationObserver to the new conversation container.
+
+  var _lastDetectedUrl = '';
+
+  function setupSPANavigationDetection() {
+    _lastDetectedUrl = window.location.href;
+
+    // Intercept pushState and replaceState so we know when the SPA navigates
+    var origPushState = history.pushState;
+    var origReplaceState = history.replaceState;
+
+    history.pushState = function () {
+      origPushState.apply(this, arguments);
+      onSPANavigation();
+    };
+
+    history.replaceState = function () {
+      origReplaceState.apply(this, arguments);
+      onSPANavigation();
+    };
+
+    // Also catch popstate (browser back/forward)
+    window.addEventListener('popstate', function () {
+      onSPANavigation();
+    });
+  }
+
+  function onSPANavigation() {
+    var newUrl = window.location.href;
+    if (newUrl === _lastDetectedUrl) return;
+    var oldUrl = _lastDetectedUrl;
+    _lastDetectedUrl = newUrl;
+
+    addLog('SPA navigation detected: ' + oldUrl.substring(oldUrl.lastIndexOf('/')) + ' -> ' + newUrl.substring(newUrl.lastIndexOf('/')));
+
+    // If we were running, re-attach to the new conversation after a short delay
+    // (give React time to render the new page)
+    if (runnerState === 'running') {
+      addLog('Runner is active — will re-attach to new conversation...');
+      // Stop old detection (observer is watching stale DOM)
+      stopCompletionDetection();
+      // Wait for new page to render, then re-attach
+      setTimeout(function () {
+        autoResumeAfterNavigation();
+      }, 2000);
+    }
+  }
+
+  // Re-attaches completion detection after an SPA navigation or page load.
+  // If the AI is still responding, it picks up mid-stream.
+  // If the AI has already finished, it advances to the next phase.
+  function autoResumeAfterNavigation() {
+    if (runnerState !== 'running') return;
+    if (currentPhaseIndex >= phases.length) return;
+
+    addLog('Re-attaching completion detection for Phase ' + (currentPhaseIndex + 1) + '...');
+
+    // Check if a stop button is visible (AI is still generating)
+    var stopVisible = isStopVisible();
+    var sendAvailable = isSendAvailable();
+
+    if (stopVisible) {
+      // AI is still generating — just watch for it to finish
+      addLog('AI is still generating. Watching for completion...');
+      startCompletionDetection(function () {
+        phases[currentPhaseIndex].status = 'complete';
+        addLog('Phase ' + phases[currentPhaseIndex].number + ' complete! (resumed)');
+        currentPhaseIndex++;
+        saveState();
+        refreshUI();
+        setTimeout(function () {
+          if (runnerState === 'running') runCurrentPhase();
+        }, INTER_PHASE_DELAY);
+      });
+    } else if (sendAvailable) {
+      // AI has finished or nothing is running — check if current phase was already sent
+      var phase = phases[currentPhaseIndex];
+      if (phase.status === 'running') {
+        // Phase was marked running but AI seems done — it likely completed during navigation
+        addLog('Phase ' + phase.number + ' appears complete (send available, no stop button). Advancing...');
+        phase.status = 'complete';
+        currentPhaseIndex++;
+        saveState();
+        refreshUI();
+        setTimeout(function () {
+          if (runnerState === 'running') runCurrentPhase();
+        }, INTER_PHASE_DELAY);
+      } else {
+        // Phase hasn't been sent yet — send it
+        addLog('Current phase not yet sent. Sending now...');
+        runCurrentPhase();
+      }
+    } else {
+      // Neither stop nor send visible — page might still be loading
+      addLog('Page still loading. Will retry in 3s...');
+      setTimeout(function () {
+        if (runnerState === 'running') autoResumeAfterNavigation();
+      }, 3000);
+    }
   }
 
   waitForPage();
