@@ -1828,6 +1828,12 @@
             var bpLabel2 = (bpKey !== 'none') ? bp.label + ' boilerplate' : 'no boilerplate';
             addLog('Created repo: ' + ghUser + '/' + appName + ' with ' + bpLabel2);
             appNameInput.value = '';
+
+            // Refresh page after 5s so the new repo appears in Claude Code Web's dropdown
+            addLog('Page will refresh in 5s so repo appears in dropdown...');
+            setTimeout(function () {
+              location.reload();
+            }, 5000);
           });
         } else {
           return resp.json().then(function (err) {
