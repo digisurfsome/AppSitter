@@ -291,6 +291,31 @@
   function attemptSend(retries, callback, preferNewSession) {
     var btn = null;
 
+    // ---- DEBUG: Dump all buttons near top of page so we can see what exists ----
+    if (preferNewSession) {
+      var debugBtns = document.querySelectorAll('button');
+      var nearbyBtnInfo = [];
+      for (var db = 0; db < debugBtns.length; db++) {
+        var dbEl = debugBtns[db];
+        if (dbEl.closest('#pb-panel') || dbEl.closest('#pb-toggle')) continue;
+        var dbRect = dbEl.getBoundingClientRect();
+        if (dbRect.width === 0 || dbRect.height === 0) continue;
+        if (dbRect.top < 200) {
+          nearbyBtnInfo.push(
+            'tag=' + dbEl.tagName +
+            ' aria="' + (dbEl.getAttribute('aria-label') || '') + '"' +
+            ' disabled=' + dbEl.disabled +
+            ' rect=[' + Math.round(dbRect.left) + ',' + Math.round(dbRect.top) + ',' +
+            Math.round(dbRect.width) + 'x' + Math.round(dbRect.height) + ']' +
+            ' svg=' + !!dbEl.querySelector('svg') +
+            ' text="' + dbEl.textContent.trim().substring(0, 20) + '"'
+          );
+        }
+      }
+      addLog('DEBUG SEND: ' + nearbyBtnInfo.length + ' buttons near top: ' + nearbyBtnInfo.join(' | '));
+    }
+    // ---- END DEBUG ----
+
     // If targeting the new-session "Ask Claude" input, find the send button near it
     if (preferNewSession) {
       // Strategy 1: Known selectors, allow disabled buttons too (we'll force-click)
@@ -299,9 +324,9 @@
       var disabledBtn = null;
       for (var s = 0; s < selectors.length; s++) {
         var candidates = document.querySelectorAll(selectors[s]);
+        addLog('DEBUG S1: selector "' + selectors[s] + '" found ' + candidates.length + ' candidates');
         for (var c = 0; c < candidates.length; c++) {
           var r = candidates[c].getBoundingClientRect();
-          // The "Ask Claude" send button is near the top of the page
           if (r.top < 200 && r.width > 0) {
             if (!candidates[c].disabled) {
               enabledBtn = candidates[c];
@@ -314,17 +339,22 @@
         if (enabledBtn) break;
       }
       btn = enabledBtn || disabledBtn;
+      addLog('DEBUG S1 result: btn=' + (btn ? 'found' : 'null') + (btn ? ' disabled=' + btn.disabled : ''));
 
       // Strategy 2: Look for a submit button in the same form/container as the editor
       // (accept disabled buttons too)
       if (!btn) {
         var ed = getEditor(true);
+        addLog('DEBUG S2: editor=' + (ed ? ed.el.tagName + ' y=' + Math.round(ed.el.getBoundingClientRect().top) : 'null'));
         if (ed) {
           var parent = ed.el.closest('form') || ed.el.parentElement;
-          while (parent && parent !== document.body) {
+          var parentLevels = 0;
+          while (parent && parent !== document.body && parentLevels < 10) {
+            parentLevels++;
             var formBtn = parent.querySelector('button[type="submit"], button[aria-label*="Send" i]');
             if (formBtn && !formBtn.closest('#pb-panel')) {
               btn = formBtn;
+              addLog('DEBUG S2: found btn in parent level ' + parentLevels + ' tag=' + parent.tagName);
               break;
             }
             parent = parent.parentElement;
@@ -339,6 +369,8 @@
         var ed2 = getEditor(true);
         if (ed2) {
           var edRect = ed2.el.getBoundingClientRect();
+          addLog('DEBUG S3: editor rect: left=' + Math.round(edRect.left) + ' top=' + Math.round(edRect.top) +
+                 ' right=' + Math.round(edRect.right) + ' bottom=' + Math.round(edRect.bottom));
           var allBtns = document.querySelectorAll('button');
           var closestBtn = null;
           var closestDist = Infinity;
@@ -368,12 +400,14 @@
           }
           if (closestBtn) {
             btn = closestBtn;
-            addLog('Found send button near sidebar input (proximity match, disabled=' + closestBtn.disabled + ').');
+            addLog('Found send button near sidebar input (proximity match, disabled=' + closestBtn.disabled +
+                   ' rect=[' + Math.round(closestBtn.getBoundingClientRect().left) + ',' +
+                   Math.round(closestBtn.getBoundingClientRect().top) + ']).');
           } else {
-            addLog('DEBUG: No button found near editor. Editor rect: left=' + Math.round(edRect.left) +
-                   ' top=' + Math.round(edRect.top) + ' right=' + Math.round(edRect.right) +
-                   ' btns checked=' + allBtns.length);
+            addLog('DEBUG S3: No button found near editor within constraints. Total btns=' + allBtns.length);
           }
+        } else {
+          addLog('DEBUG S3: getEditor(true) returned null');
         }
       }
     }
@@ -389,7 +423,9 @@
 
     if (btn && !btn.disabled) {
       robustClick(btn);
-      addLog('Clicked send button' + (preferNewSession ? ' (new-session)' : '') + '.');
+      addLog('Clicked send button' + (preferNewSession ? ' (new-session)' : '') +
+             ' aria="' + (btn.getAttribute('aria-label') || '') + '"' +
+             ' rect=[' + Math.round(btn.getBoundingClientRect().left) + ',' + Math.round(btn.getBoundingClientRect().top) + '].');
       if (callback) callback(true);
       return;
     }
@@ -912,155 +948,110 @@
       searchInput.dispatchEvent(new Event('change', { bubbles: true }));
       addLog('Typed repo name: ' + repoName);
 
-      // Step 4: Wait for filtering, then click the matching result
+      // Step 4: Wait for filtering, then select via keyboard (ArrowDown + Enter)
+      // Click-based selection doesn't work on Claude's Radix/React dropdown,
+      // so we use keyboard navigation which is the standard combobox pattern.
       setTimeout(function () {
-        var found = false;
+        // DEBUG: Log all visible elements in the dropdown area so we can see the structure
         var lowerName = repoName.toLowerCase();
-
-        // Look for matching items in dropdown results
-        var itemSelectors = [
-          '[role="option"]',
-          '[role="menuitem"]',
-          '[class*="dropdown"] li',
-          '[class*="dropdown"] [class*="item"]',
-          '[class*="popover"] li',
-          '[class*="popover"] [class*="item"]',
-          '[class*="list"] [class*="item"]'
-        ];
-
-        for (var s = 0; s < itemSelectors.length; s++) {
-          var items = document.querySelectorAll(itemSelectors[s]);
-          for (var i = 0; i < items.length; i++) {
-            var itemText = items[i].textContent.trim().toLowerCase();
-            if (itemText.indexOf(lowerName) !== -1 && !items[i].closest('#pb-panel')) {
-              robustClick(items[i]);
-              addLog('Selected repo: ' + repoName);
-              found = true;
-              break;
+        var debugEls = document.querySelectorAll('*');
+        var dropdownDebug = [];
+        for (var di = 0; di < debugEls.length; di++) {
+          var de = debugEls[di];
+          if (de.closest('#pb-panel') || de.closest('#pb-toggle')) continue;
+          var dr = de.getBoundingClientRect();
+          if (dr.left < 400 && dr.top > 40 && dr.top < 500 && dr.width > 20 && dr.height > 5 && dr.height < 100) {
+            var dt = de.textContent.trim().toLowerCase();
+            if (dt.indexOf(lowerName) !== -1 && dt.length < 80 && de.children.length < 5) {
+              dropdownDebug.push(
+                de.tagName + '.' + (de.className || '').substring(0, 25) +
+                ' role="' + (de.getAttribute('role') || '') + '"' +
+                ' rect=[' + Math.round(dr.left) + ',' + Math.round(dr.top) + ',' +
+                Math.round(dr.width) + 'x' + Math.round(dr.height) + ']' +
+                ' text="' + de.textContent.trim().substring(0, 30) + '"'
+              );
             }
           }
-          if (found) break;
         }
+        addLog('DEBUG DROPDOWN: ' + dropdownDebug.length + ' matching els: ' + dropdownDebug.slice(0, 8).join(' | '));
 
-        // Broader fallback: any visible element in the dropdown area that contains
-        // the repo name. The Claude dropdown items may be plain divs without roles
-        // or tabindex, so we scan ALL elements below the search input.
-        if (!found) {
-          var allDropdownEls = document.querySelectorAll('a, button, [role="button"], div, li, span, p');
-          var bestMatch = null;
-          var bestLen = Infinity;
-          for (var j = 0; j < allDropdownEls.length; j++) {
-            var cel = allDropdownEls[j];
-            if (cel.closest('#pb-panel') || cel.closest('#pb-toggle')) continue;
-            var crect = cel.getBoundingClientRect();
-            // Must be in the dropdown area: left side, below the repo button, visible
-            if (crect.left < 400 && crect.top > 40 && crect.top < 500 &&
-                crect.width > 30 && crect.height > 10 && crect.height < 80) {
-              var celText = cel.textContent.trim().toLowerCase();
-              // Match: text contains repo name, is reasonably short, and prefer
-              // the most specific (shortest) match to avoid clicking a parent container
-              if (celText.indexOf(lowerName) !== -1 && celText.length < 100 && celText.length < bestLen) {
-                // Make sure this element doesn't have a child that also matches
-                // (we want the innermost/most specific element)
-                var childMatch = false;
-                var children = cel.children;
-                for (var ch = 0; ch < children.length; ch++) {
-                  var childText = children[ch].textContent.trim().toLowerCase();
-                  if (childText.indexOf(lowerName) !== -1 && childText.length < 100) {
-                    childMatch = true;
+        searchInput.focus();
+
+        // Press ArrowDown to highlight the first matching result
+        searchInput.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40,
+          bubbles: true, cancelable: true
+        }));
+
+        // Short delay, then press Enter to confirm selection
+        setTimeout(function () {
+          searchInput.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+            bubbles: true, cancelable: true
+          }));
+          addLog('Selected repo: ' + repoName + ' (keyboard: ArrowDown+Enter)');
+
+          // Verify the dropdown closed after selection
+          setTimeout(function () {
+            var stillOpen = false;
+            if (searchInput) {
+              var siRect = searchInput.getBoundingClientRect();
+              if (siRect.width > 0 && siRect.height > 0) {
+                stillOpen = true;
+              }
+            }
+
+            if (stillOpen) {
+              addLog('Dropdown still open after keyboard select — trying click fallback...');
+              // Try clicking the first visible item that matches
+              var lowerName = repoName.toLowerCase();
+              var allEls = document.querySelectorAll('a, button, [role="option"], [role="menuitem"], div, li, span');
+              var clicked = false;
+              for (var j = 0; j < allEls.length; j++) {
+                var cel = allEls[j];
+                if (cel.closest('#pb-panel') || cel.closest('#pb-toggle')) continue;
+                var crect = cel.getBoundingClientRect();
+                if (crect.left < 400 && crect.top > 40 && crect.top < 500 &&
+                    crect.width > 30 && crect.height > 10 && crect.height < 80) {
+                  var celText = cel.textContent.trim().toLowerCase();
+                  if (celText.indexOf(lowerName) !== -1 && celText.length < 100) {
+                    // Try every interaction method we can
+                    robustClick(cel);
+                    // Also try clicking parent in case child span doesn't have handler
+                    if (cel.parentElement && cel.parentElement.tagName !== 'BODY') {
+                      robustClick(cel.parentElement);
+                    }
+                    addLog('Clicked dropdown item: "' + cel.textContent.trim().substring(0, 40) + '" tag=' + cel.tagName);
+                    clicked = true;
                     break;
                   }
                 }
-                if (!childMatch) {
-                  bestMatch = cel;
-                  bestLen = celText.length;
-                }
               }
-            }
-          }
-          if (bestMatch) {
-            robustClick(bestMatch);
-            addLog('Selected repo: ' + repoName + ' (fallback match: "' + bestMatch.textContent.trim().substring(0, 30) + '")');
-            found = true;
-          }
-        }
-
-        // Second-chance fallback: if the above found nothing, look for any clickable
-        // row/item below the search input that visually contains the repo name.
-        // This time, prefer PARENT containers (the actual list row) over inner spans.
-        if (!found) {
-          var rowEls = document.querySelectorAll('a, button, [role="button"], li, div[tabindex], div[data-value]');
-          for (var r = 0; r < rowEls.length; r++) {
-            var row = rowEls[r];
-            if (row.closest('#pb-panel') || row.closest('#pb-toggle')) continue;
-            var rRect = row.getBoundingClientRect();
-            if (rRect.left < 400 && rRect.top > 40 && rRect.top < 500 &&
-                rRect.width > 50 && rRect.height > 15 && rRect.height < 100) {
-              var rowText = row.textContent.trim().toLowerCase();
-              if (rowText.indexOf(lowerName) !== -1 && rowText.length < 150) {
-                robustClick(row);
-                addLog('Selected repo: ' + repoName + ' (row fallback: "' + row.textContent.trim().substring(0, 30) + '")');
-                found = true;
-                break;
+              if (!clicked) {
+                addLog('WARNING: Could not select repo. Pressing Escape to close dropdown.');
               }
-            }
-          }
-        }
-
-        if (!found) {
-          addLog('WARNING: Could not find "' + repoName + '" in dropdown. Closing.');
-          document.body.click();
-          setTimeout(function () {
-            if (callback) callback();
-          }, REPO_CLICK_DELAY);
-          return;
-        }
-
-        // Verify the dropdown actually closed after clicking.
-        // If it's still open after 800ms, the click didn't register — retry by
-        // clicking the matched element again and then clicking body to close.
-        addLog('Repo selected. Verifying dropdown closed...');
-        setTimeout(function () {
-          // Check if dropdown/popover is still visible
-          var stillOpen = false;
-          var dropdownContainers = document.querySelectorAll(
-            '[role="listbox"], [role="dialog"]:not([aria-modal="true"]), [role="menu"], ' +
-            '[class*="dropdown"]:not(#pb-panel), [class*="popover"]:not(#pb-panel), [class*="popup"]:not(#pb-panel)'
-          );
-          for (var dc = 0; dc < dropdownContainers.length; dc++) {
-            var dcRect = dropdownContainers[dc].getBoundingClientRect();
-            if (dcRect.width > 0 && dcRect.height > 0 && dcRect.left < 400 && dcRect.top < 500) {
-              stillOpen = true;
-              break;
-            }
-          }
-          // Also check if the search input is still visible
-          if (!stillOpen && searchInput) {
-            var siRect = searchInput.getBoundingClientRect();
-            if (siRect.width > 0 && siRect.height > 0) {
-              stillOpen = true;
-            }
-          }
-          if (stillOpen) {
-            addLog('Dropdown still open — retrying click...');
-            // Try pressing Escape to close, then click body
-            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
-            setTimeout(function () {
-              document.body.click();
-              addLog('Repo selected (forced close). Waiting for UI to settle...');
+              // Force close dropdown
+              searchInput.dispatchEvent(new KeyboardEvent('keydown', {
+                key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
+                bubbles: true, cancelable: true
+              }));
+              setTimeout(function () {
+                document.body.click();
+                addLog('Repo selected (forced close). Waiting for UI to settle...');
+                setTimeout(function () {
+                  addLog('Ready for injection.');
+                  if (callback) callback();
+                }, 1500);
+              }, 300);
+            } else {
+              addLog('Repo selected. Waiting for UI to settle...');
               setTimeout(function () {
                 addLog('Ready for injection.');
                 if (callback) callback();
               }, 1500);
-            }, 300);
-          } else {
-            addLog('Repo selected. Waiting for UI to settle...');
-            setTimeout(function () {
-              addLog('Ready for injection.');
-              if (callback) callback();
-            }, 1500);
-          }
-        }, 800);
+            }
+          }, 800);
+        }, 300);
       }, REPO_SEARCH_DELAY);
     }, REPO_SELECT_TIMEOUT);
   }
