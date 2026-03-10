@@ -1243,17 +1243,21 @@
       if (remaining <= 0) {
         clearInterval(timer);
         countdownSpan.textContent = '0';
-        // Force hard refresh — clear caches then navigate fresh
-        // This ensures the repo list API returns the newly created repo
-        if ('caches' in window) {
-          caches.keys().then(function (names) {
-            return Promise.all(names.map(function (n) { return caches.delete(n); }));
-          }).then(function () {
-            window.location.replace(window.location.pathname);
-          });
-        } else {
-          window.location.replace(window.location.pathname);
-        }
+        // Nuclear hard refresh — clear all caches, unregister service workers, then reload
+        try {
+          if ('caches' in window) {
+            caches.keys().then(function (names) {
+              names.forEach(function (n) { caches.delete(n); });
+            }).catch(function () {});
+          }
+          if (navigator.serviceWorker) {
+            navigator.serviceWorker.getRegistrations().then(function (regs) {
+              regs.forEach(function (r) { r.unregister(); });
+            }).catch(function () {});
+          }
+        } catch (e) {}
+        // Let cache clearing finish, then hard reload (true = bypass HTTP cache)
+        setTimeout(function () { location.reload(true); }, 300);
       } else {
         countdownSpan.textContent = remaining;
       }
