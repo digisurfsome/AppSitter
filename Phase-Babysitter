@@ -9,6 +9,7 @@
 // @match        https://chat.openai.com/*
 // @match        https://gemini.google.com/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM.xmlHttpRequest
 // @connect      api.github.com
 // @run-at       document-idle
 // ==/UserScript==
@@ -386,17 +387,21 @@
       };
     }
 
-    // Try GM_xmlhttpRequest first (cross-origin), fall back to fetch
-    if (typeof GM_xmlhttpRequest === 'function') {
+    // Try GM_xmlhttpRequest / GM.xmlHttpRequest first (cross-origin), fall back to fetch
+    var gmXhr = (typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest
+              : (typeof GM !== 'undefined' && GM && typeof GM.xmlHttpRequest === 'function') ? GM.xmlHttpRequest.bind(GM)
+              : null;
+
+    if (gmXhr) {
       return new Promise(function (resolve, reject) {
-        GM_xmlhttpRequest({
+        gmXhr({
           method: method,
           url: url,
           headers: headers,
           data: body,
           timeout: 15000,
           onload: function (resp) { resolve(wrapResponse(resp.status, resp.responseText)); },
-          onerror: function (err) { reject(err); },
+          onerror: function (err) { reject(new Error('GM_xmlhttpRequest error: ' + JSON.stringify(err))); },
           ontimeout: function () { reject(new Error('Request timed out')); }
         });
       });
@@ -1619,8 +1624,8 @@
           tokenSaveBtn.disabled = false;
           showTokenCollapsed();
         });
-      }).catch(function () {
-        addLog('Network error verifying token.');
+      }).catch(function (err) {
+        addLog('Network error verifying token. ' + (err && err.message ? err.message : String(err)));
         tokenSaveBtn.textContent = 'Save & Verify';
         tokenSaveBtn.disabled = false;
       });
