@@ -78,6 +78,26 @@
     el.click();
   }
 
+  // Clicks at specific screen coordinates, letting the browser route to the right element.
+  // This works even when the visual element isn't the one with the event handler
+  // (React portals, overlay layers, etc.)
+  function clickAtCoordinates(x, y) {
+    var target = document.elementFromPoint(x, y);
+    var commonInit = {
+      bubbles: true, cancelable: true, view: window,
+      clientX: x, clientY: y, screenX: x, screenY: y,
+      button: 0, buttons: 1
+    };
+    addLog('DEBUG clickAtCoords: (' + Math.round(x) + ',' + Math.round(y) + ') -> ' +
+           (target ? target.tagName + '.' + (target.className || '').substring(0, 25) : 'null'));
+    if (!target) return;
+    target.dispatchEvent(new PointerEvent('pointerdown', commonInit));
+    target.dispatchEvent(new MouseEvent('mousedown', commonInit));
+    target.dispatchEvent(new PointerEvent('pointerup', commonInit));
+    target.dispatchEvent(new MouseEvent('mouseup', commonInit));
+    target.dispatchEvent(new MouseEvent('click', commonInit));
+  }
+
   // ============================================================
   // STATE
   // ============================================================
@@ -979,96 +999,141 @@
       }
 
       function selectFirstResult() {
-        // DEBUG: Log what's in the dropdown now
         var lowerName = repoName.toLowerCase();
-        var debugEls = document.querySelectorAll('*');
-        var dropdownDebug = [];
-        for (var di = 0; di < debugEls.length; di++) {
-          var de = debugEls[di];
+
+        // Find the first visible dropdown item that contains the repo name.
+        // We need its COORDINATES so we can click at that exact screen position.
+        var matchRect = null;
+        var matchEl = null;
+
+        // Scan for visible elements containing the repo name below the search input
+        var searchRect = searchInput.getBoundingClientRect();
+        var allEls = document.querySelectorAll('*');
+        var bestHeight = Infinity;
+
+        for (var di = 0; di < allEls.length; di++) {
+          var de = allEls[di];
+          if (de === searchInput || de.contains(searchInput) || searchInput.contains(de)) continue;
           if (de.closest('#pb-panel') || de.closest('#pb-toggle')) continue;
           var dr = de.getBoundingClientRect();
-          if (dr.left < 400 && dr.top > 40 && dr.top < 500 && dr.width > 20 && dr.height > 5 && dr.height < 100) {
+          // Must be below the search input, in the left column, visible
+          if (dr.top >= searchRect.bottom - 5 && dr.top < 500 &&
+              dr.left < 400 && dr.width > 30 && dr.height > 15 && dr.height < 100) {
             var dt = de.textContent.trim().toLowerCase();
-            if (dt.indexOf(lowerName) !== -1 && dt.length < 80 && de.children.length < 5) {
-              dropdownDebug.push(
-                de.tagName + '.' + (de.className || '').substring(0, 25) +
-                ' role="' + (de.getAttribute('role') || '') + '"' +
-                ' rect=[' + Math.round(dr.left) + ',' + Math.round(dr.top) + ',' +
-                Math.round(dr.width) + 'x' + Math.round(dr.height) + ']' +
-                ' text="' + de.textContent.trim().substring(0, 30) + '"'
-              );
+            if (dt.indexOf(lowerName) !== -1 && dt.length < 100) {
+              // Prefer the element with the smallest height (most specific / tightest box)
+              // that still looks like a clickable row
+              if (dr.height < bestHeight && dr.height > 20) {
+                bestHeight = dr.height;
+                matchRect = dr;
+                matchEl = de;
+              }
             }
           }
         }
-        addLog('DEBUG DROPDOWN: ' + dropdownDebug.length + ' matching els: ' + dropdownDebug.slice(0, 8).join(' | '));
 
-        // Primary approach: keyboard selection (ArrowDown + Enter)
-        searchInput.focus();
-        searchInput.dispatchEvent(new KeyboardEvent('keydown', {
-          key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40,
-          bubbles: true, cancelable: true
-        }));
+        if (matchEl) {
+          addLog('DEBUG: Found dropdown match: tag=' + matchEl.tagName +
+                 ' class="' + (matchEl.className || '').substring(0, 30) + '"' +
+                 ' role="' + (matchEl.getAttribute('role') || '') + '"' +
+                 ' rect=[' + Math.round(matchRect.left) + ',' + Math.round(matchRect.top) + ',' +
+                 Math.round(matchRect.width) + 'x' + Math.round(matchRect.height) + ']' +
+                 ' text="' + matchEl.textContent.trim().substring(0, 40) + '"');
+        } else {
+          addLog('WARNING: No dropdown match found for "' + repoName + '"');
+        }
 
+        if (matchRect) {
+          // PRIMARY: Click at the exact screen coordinates of the dropdown result.
+          // Use document.elementFromPoint to find the real target (handles portals/overlays)
+          var cx = matchRect.left + matchRect.width / 2;
+          var cy = matchRect.top + matchRect.height / 2;
+          addLog('Clicking dropdown result at coords (' + Math.round(cx) + ',' + Math.round(cy) + ')...');
+          clickAtCoordinates(cx, cy);
+        }
+
+        // Check if it worked after a short delay
         setTimeout(function () {
-          searchInput.dispatchEvent(new KeyboardEvent('keydown', {
-            key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
-            bubbles: true, cancelable: true
-          }));
-          addLog('Selected repo: ' + repoName + ' (keyboard: ArrowDown+Enter)');
-
-          // Check if dropdown closed
-          setTimeout(function () {
-            var stillOpen = false;
-            if (searchInput) {
-              var siRect = searchInput.getBoundingClientRect();
-              if (siRect.width > 0 && siRect.height > 0) {
-                stillOpen = true;
-              }
+          var stillOpen = false;
+          if (searchInput) {
+            var siRect = searchInput.getBoundingClientRect();
+            if (siRect.width > 0 && siRect.height > 0) {
+              stillOpen = true;
             }
+          }
 
-            if (stillOpen) {
-              addLog('Dropdown still open — trying direct click on first match...');
-              // Last resort: find and click the first matching item
-              var allEls = document.querySelectorAll('a, button, [role="option"], [role="menuitem"], div, li, span');
-              for (var j = 0; j < allEls.length; j++) {
-                var cel = allEls[j];
-                if (cel.closest('#pb-panel') || cel.closest('#pb-toggle')) continue;
-                var crect = cel.getBoundingClientRect();
-                if (crect.left < 400 && crect.top > 40 && crect.top < 500 &&
-                    crect.width > 30 && crect.height > 10 && crect.height < 80) {
-                  var celText = cel.textContent.trim().toLowerCase();
-                  if (celText.indexOf(lowerName) !== -1 && celText.length < 100) {
-                    robustClick(cel);
-                    if (cel.parentElement && cel.parentElement.tagName !== 'BODY') {
-                      robustClick(cel.parentElement);
-                    }
-                    addLog('Clicked match: "' + cel.textContent.trim().substring(0, 40) + '" tag=' + cel.tagName);
-                    break;
-                  }
-                }
-              }
-              // Force close
+          if (stillOpen && matchRect) {
+            // Retry 1: Try keyboard ArrowDown + Enter
+            addLog('Dropdown still open — trying keyboard ArrowDown+Enter...');
+            searchInput.focus();
+            searchInput.dispatchEvent(new KeyboardEvent('keydown', {
+              key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40,
+              bubbles: true, cancelable: true
+            }));
+            setTimeout(function () {
               searchInput.dispatchEvent(new KeyboardEvent('keydown', {
-                key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
+                key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
                 bubbles: true, cancelable: true
               }));
+
+              // Check again
               setTimeout(function () {
-                document.body.click();
-                addLog('Repo selected (forced close). Waiting for UI to settle...');
-                setTimeout(function () {
-                  addLog('Ready for injection.');
-                  if (callback) callback();
-                }, 1500);
-              }, 300);
-            } else {
-              addLog('Repo selected successfully. Waiting for UI to settle...');
-              setTimeout(function () {
-                addLog('Ready for injection.');
-                if (callback) callback();
-              }, 1500);
-            }
-          }, 800);
-        }, 300);
+                var still2 = false;
+                if (searchInput) {
+                  var si2 = searchInput.getBoundingClientRect();
+                  if (si2.width > 0 && si2.height > 0) still2 = true;
+                }
+                if (still2) {
+                  // Retry 2: Try robustClick on element + parent + grandparent
+                  addLog('Still open — trying robustClick on match + ancestors...');
+                  if (matchEl) {
+                    robustClick(matchEl);
+                    if (matchEl.parentElement) robustClick(matchEl.parentElement);
+                    if (matchEl.parentElement && matchEl.parentElement.parentElement) {
+                      robustClick(matchEl.parentElement.parentElement);
+                    }
+                  }
+                  // Force close
+                  setTimeout(function () {
+                    searchInput.dispatchEvent(new KeyboardEvent('keydown', {
+                      key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
+                      bubbles: true, cancelable: true
+                    }));
+                    document.body.click();
+                    addLog('Repo selection forced close. Waiting to settle...');
+                    setTimeout(function () {
+                      addLog('Ready for injection.');
+                      if (callback) callback();
+                    }, 1500);
+                  }, 300);
+                } else {
+                  addLog('Selected repo: ' + repoName + ' (keyboard)');
+                  setTimeout(function () {
+                    addLog('Ready for injection.');
+                    if (callback) callback();
+                  }, 1500);
+                }
+              }, 600);
+            }, 200);
+          } else if (stillOpen) {
+            addLog('Dropdown open but no match found. Closing...');
+            searchInput.dispatchEvent(new KeyboardEvent('keydown', {
+              key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
+              bubbles: true, cancelable: true
+            }));
+            document.body.click();
+            setTimeout(function () {
+              addLog('Ready for injection.');
+              if (callback) callback();
+            }, 1500);
+          } else {
+            addLog('Selected repo: ' + repoName + ' (coordinate click)');
+            setTimeout(function () {
+              addLog('Ready for injection.');
+              if (callback) callback();
+            }, 1500);
+          }
+        }, 600);
       }
 
       typeNextChar();
