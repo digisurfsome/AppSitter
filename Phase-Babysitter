@@ -32,7 +32,8 @@
     autoCommit: 'pb-auto-commit',
     zoom: 'pb-zoom',
     githubToken: 'pb-github-token',
-    githubUser: 'pb-github-user'
+    githubUser: 'pb-github-user',
+    refreshResume: 'pb-refresh-resume'
   };
 
   var BOILERPLATES = {
@@ -387,6 +388,16 @@
       var c = localStorage.getItem(STORAGE.currentPhase);
       if (c !== null) currentPhaseIndex = parseInt(c, 10);
       var s = localStorage.getItem(STORAGE.state);
+
+      // Check if we're resuming after a page refresh (triggered by Start)
+      var refreshResume = localStorage.getItem(STORAGE.refreshResume);
+      if (refreshResume === 'true' && s === 'running') {
+        localStorage.removeItem(STORAGE.refreshResume);
+        // Keep state as 'running' and auto-resume after UI builds
+        runnerState = 'running';
+        return; // will be auto-started in waitForPage
+      }
+
       if (s && s !== 'running') runnerState = s;
       if (s === 'running') runnerState = 'paused';
     } catch (_) {}
@@ -1920,6 +1931,19 @@
       runnerState = 'running';
       saveState();
       refreshUI();
+
+      // For Phase 1 with a repo set: refresh the page first so the repo
+      // appears in Claude Code Web's dropdown (newly created repos need a reload)
+      var repoName = getRepoName();
+      if (currentPhaseIndex === 0 && repoName && SITE === 'claude') {
+        addLog('Refreshing page so new repo appears in dropdown...');
+        localStorage.setItem(STORAGE.refreshResume, 'true');
+        setTimeout(function () {
+          location.reload();
+        }, 500);
+        return; // will auto-resume after refresh via loadState
+      }
+
       addLog('Runner started.');
 
       // Schedule delayed conversation rename (~30s after start)
@@ -2155,6 +2179,15 @@
         loadState();
         injectStyles();
         buildUI();
+
+        // Auto-resume after refresh: if state is still 'running', start the runner
+        if (runnerState === 'running' && phases.length > 0 && currentPhaseIndex < phases.length) {
+          // Wait for Claude Code Web UI to fully load before resuming
+          setTimeout(function () {
+            addLog('Auto-resuming after page refresh...');
+            runCurrentPhase();
+          }, 3000);
+        }
       }
     }, 200);
   }
