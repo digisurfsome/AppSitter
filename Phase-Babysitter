@@ -387,33 +387,36 @@
       };
     }
 
-    // Try GM_xmlhttpRequest / GM.xmlHttpRequest first (cross-origin), fall back to fetch
-    var gmXhr = (typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest
-              : (typeof GM !== 'undefined' && GM && typeof GM.xmlHttpRequest === 'function') ? GM.xmlHttpRequest.bind(GM)
-              : null;
+    function doFetch() {
+      return fetch(url, { method: method, headers: headers, body: body })
+        .then(function (resp) {
+          return resp.text().then(function (text) {
+            return wrapResponse(resp.status, text);
+          });
+        });
+    }
 
-    if (gmXhr) {
+    function doGmXhr() {
+      var gmXhr = (typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest
+                : (typeof GM !== 'undefined' && GM && typeof GM.xmlHttpRequest === 'function') ? GM.xmlHttpRequest.bind(GM)
+                : null;
+      if (!gmXhr) return Promise.reject(new Error('No GM_xmlhttpRequest'));
       return new Promise(function (resolve, reject) {
         gmXhr({
           method: method,
           url: url,
           headers: headers,
           data: body,
-          timeout: 15000,
+          timeout: 10000,
           onload: function (resp) { resolve(wrapResponse(resp.status, resp.responseText)); },
-          onerror: function (err) { reject(new Error('GM_xmlhttpRequest error: ' + JSON.stringify(err))); },
-          ontimeout: function () { reject(new Error('Request timed out')); }
+          onerror: function () { reject(new Error('GM_xmlhttpRequest error')); },
+          ontimeout: function () { reject(new Error('GM_xmlhttpRequest timed out')); }
         });
       });
     }
 
-    // Fallback: regular fetch
-    return fetch(url, { method: method, headers: headers, body: body })
-      .then(function (resp) {
-        return resp.text().then(function (text) {
-          return wrapResponse(resp.status, text);
-        });
-      });
+    // Try fetch first (works for CORS-enabled APIs like GitHub), fall back to GM_xmlhttpRequest
+    return doFetch().catch(function () { return doGmXhr(); });
   }
 
   function slugify(name) {
