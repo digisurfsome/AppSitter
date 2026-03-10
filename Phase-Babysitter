@@ -103,18 +103,27 @@
 
   function getEditor() {
     var el;
-    el = document.querySelector('.ProseMirror[contenteditable="true"]');
-    if (el) return { el: el, type: 'prosemirror' };
-    el = document.querySelector('div[data-placeholder][contenteditable="true"]');
-    if (el) return { el: el, type: 'prosemirror' };
-    el = document.querySelector('#prompt-textarea');
-    if (el) return { el: el, type: 'prosemirror' };
-    el = document.querySelector('.ql-editor[contenteditable="true"]');
-    if (el) return { el: el, type: 'prosemirror' };
-    el = document.querySelector('div[contenteditable="true"]');
-    if (el) return { el: el, type: 'prosemirror' };
-    el = document.querySelector('textarea');
-    if (el) return { el: el, type: 'textarea' };
+    var selectors = [
+      { sel: '.ProseMirror[contenteditable="true"]', type: 'prosemirror' },
+      { sel: 'div[data-placeholder][contenteditable="true"]', type: 'prosemirror' },
+      { sel: '#prompt-textarea', type: 'prosemirror' },
+      { sel: '.ql-editor[contenteditable="true"]', type: 'prosemirror' },
+      { sel: 'div[contenteditable="true"]', type: 'prosemirror' },
+      { sel: 'textarea', type: 'textarea' }
+    ];
+    for (var i = 0; i < selectors.length; i++) {
+      var candidates = document.querySelectorAll(selectors[i].sel);
+      for (var j = 0; j < candidates.length; j++) {
+        el = candidates[j];
+        // Skip elements inside our own panel
+        if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
+        // Must be visible
+        var rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          return { el: el, type: selectors[i].type };
+        }
+      }
+    }
     return null;
   }
 
@@ -674,10 +683,12 @@
           var hasEditor = !!getEditor();
 
           if (urlChanged && hasEditor) {
-            addLog('New session ready. URL changed to: ' + urlNow.split('/').pop());
+            addLog('New session detected. URL: ' + urlNow.substring(urlNow.lastIndexOf('/') + 1).substring(0, 20) + '...');
+            // Wait for editor to fully initialize — new session inputs take time
             setTimeout(function () {
+              addLog('New session settled. Proceeding with injection.');
               if (callback) callback();
-            }, 1000); // extra 1s buffer for UI to fully settle
+            }, 2500); // 2.5s buffer for UI to fully settle
             return;
           }
 
@@ -857,21 +868,45 @@
     var repoName = getRepoName();
     var shouldSelectRepo = repoName && SITE === 'claude' && currentPhaseIndex === 0;
 
-    function injectAndSend() {
-      addLog('Injecting Phase ' + phase.number + '...');
+    function injectAndSend(retryCount) {
+      retryCount = retryCount || 0;
+      var MAX_INJECT_RETRIES = 5;
+      var INJECT_RETRY_DELAY = 1500;
+
+      addLog('Injecting Phase ' + phase.number + (retryCount > 0 ? ' (retry ' + retryCount + ')' : '') + '...');
 
       var text = substituteVars(phase.content);
       text = wrapPhaseContent(text, currentPhaseIndex);
+
+      // Log what editor we found for debugging
+      var editor = getEditor();
+      if (editor) {
+        var ph = editor.el.getAttribute('data-placeholder') || '';
+        var cls = editor.el.className || '';
+        addLog('Found editor: placeholder="' + (ph.substring(0, 40)) + '" class="' + cls.substring(0, 40) + '"');
+      }
+
       var injected = injectText(text);
       if (!injected) {
-        addLog('ERROR: No chat input found. Pausing.');
+        if (retryCount < MAX_INJECT_RETRIES) {
+          addLog('No chat input found. Retrying in ' + (INJECT_RETRY_DELAY / 1000) + 's... (' + (retryCount + 1) + '/' + MAX_INJECT_RETRIES + ')');
+          setTimeout(function () {
+            if (runnerState !== 'running') return;
+            injectAndSend(retryCount + 1);
+          }, INJECT_RETRY_DELAY);
+          return;
+        }
+        addLog('ERROR: No chat input found after ' + MAX_INJECT_RETRIES + ' retries. Pausing.');
         runnerState = 'paused';
         saveState();
         refreshUI();
         return;
       }
 
-      addLog('Text injected. Attempting to send...');
+      // Verify text actually got into the editor
+      var editorAfter = getEditor();
+      var contentLen = editorAfter ? (editorAfter.el.textContent || '').length : 0;
+      addLog('Text injected (' + contentLen + ' chars in editor). Attempting to send...');
 
       setTimeout(function () {
         if (runnerState !== 'running') return;
