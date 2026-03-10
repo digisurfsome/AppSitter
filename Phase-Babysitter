@@ -1243,7 +1243,8 @@
       if (remaining <= 0) {
         clearInterval(timer);
         countdownSpan.textContent = '0';
-        location.reload();
+        // Force hard refresh — bypass cache so the new repo shows in dropdown
+        window.location.href = window.location.href.split('#')[0] + '?_r=' + Date.now();
       } else {
         countdownSpan.textContent = remaining;
       }
