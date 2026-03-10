@@ -1288,11 +1288,9 @@
 
     tokenCollapsed.appendChild(tokenSetupBtn);
 
-    // On first load with no token, show setup expanded with instructions
+    // On first load with no token, show setup expanded (steps hidden)
     if (!existingToken) {
       showTokenExpanded();
-      stepsList.style.display = 'block';
-      tokenHelpBtn.textContent = 'Hide Steps';
     } else {
       showTokenCollapsed();
     }
