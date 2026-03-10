@@ -756,164 +756,99 @@
 
   function renameConversation(name) {
     if (!name || SITE !== 'claude') return;
-    addLog('Attempting to rename conversation: ' + name + '...');
+    addLog('Renaming conversation to: ' + name);
 
-    // Step 1: Find the conversation title/dropdown button at top-center
-    var titleBtn = null;
-    var selectors = [
-      '[class*="conversation"] button',
-      'header [class*="title"]',
-      'button[class*="title"]'
-    ];
-    for (var s = 0; s < selectors.length; s++) {
-      titleBtn = document.querySelector(selectors[s]);
-      if (titleBtn && !titleBtn.closest('#pb-panel')) break;
-      titleBtn = null;
-    }
+    // Simple approach: just click the title text directly — it becomes editable inline
+    // No need for dropdown menu → Rename button flow
 
-    // Fallback: look for a clickable element at top-center with a dropdown arrow
-    if (!titleBtn) {
-      var candidates = document.querySelectorAll('button, [role="button"], span[class*="title"]');
-      for (var i = 0; i < candidates.length; i++) {
-        var el = candidates[i];
-        var rect = el.getBoundingClientRect();
-        // Top center area
-        if (rect.top < 60 && rect.left > 200 && rect.right < (window.innerWidth - 200) && rect.width > 50) {
-          if (!el.closest('#pb-panel')) {
-            titleBtn = el;
-            break;
-          }
+    // Step 1: Find the conversation title text at the top-center
+    var titleEl = null;
+
+    // Look for clickable text in the top-center header area
+    var candidates = document.querySelectorAll(
+      'button, [role="button"], span, h1, h2, h3, div, a'
+    );
+    for (var i = 0; i < candidates.length; i++) {
+      var el = candidates[i];
+      if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
+      var rect = el.getBoundingClientRect();
+      // Title is at top-center of the page
+      if (rect.top < 50 && rect.left > 150 && rect.right < (window.innerWidth - 150) &&
+          rect.width > 50 && rect.height > 10 && rect.height < 60) {
+        var text = (el.textContent || '').trim();
+        // Must contain some text (the conversation title) and not be a generic button
+        if (text.length > 3 && text.length < 100 &&
+            !text.match(/^(Auto|Send|Stop|Pause|Start|Settings|Help|Search|claude)/i)) {
+          titleEl = el;
+          addLog('Found title element: "' + text.substring(0, 30) + '" tag=' + el.tagName);
+          break;
         }
       }
     }
 
-    if (!titleBtn) {
-      addLog('WARNING: Could not find conversation title button. Skipping rename.');
+    if (!titleEl) {
+      addLog('WARNING: Could not find conversation title. Skipping rename.');
       return;
     }
 
-    titleBtn.click();
-    addLog('Clicked conversation title dropdown.');
+    // Step 2: Click the title text to make it editable
+    titleEl.click();
+    addLog('Clicked title text.');
 
-    // Step 2: Wait for dropdown menu, click Rename
+    // Step 3: Wait for it to become editable, then type the new name
     setTimeout(function () {
-      var renameBtn = null;
-
-      // Strategy: find ANY visible element whose text contains "rename"
-      // The dropdown menu items could be divs, buttons, spans, etc.
-      var allVisible = document.querySelectorAll('*');
-      var renameCandidates = [];
-      for (var i = 0; i < allVisible.length; i++) {
-        var el = allVisible[i];
-        if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
-        var rect = el.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) continue;
-
-        // Get ONLY this element's own text (not children's text)
-        var ownText = '';
-        for (var c = 0; c < el.childNodes.length; c++) {
-          if (el.childNodes[c].nodeType === 3) { // Text node
-            ownText += el.childNodes[c].textContent;
-          }
-        }
-        // Also try innerText for elements with only simple children
-        var fullText = (el.innerText || el.textContent || '').trim().toLowerCase();
-        ownText = ownText.trim().toLowerCase();
-
-        if (ownText === 'rename' || fullText === 'rename') {
-          renameCandidates.push({ el: el, rect: rect, text: fullText });
+      // After clicking, the title should become an editable input or contenteditable
+      var editableInput = null;
+      var inputs = document.querySelectorAll(
+        'input[type="text"], input:not([type]), [contenteditable="true"]'
+      );
+      for (var i = 0; i < inputs.length; i++) {
+        var inp = inputs[i];
+        if (inp.closest('#pb-panel')) continue;
+        var rect = inp.getBoundingClientRect();
+        // Should be in the title area (top-center)
+        if (rect.top < 60 && rect.left > 100 && rect.width > 50) {
+          editableInput = inp;
+          break;
         }
       }
 
-      if (renameCandidates.length > 0) {
-        // Prefer the most clickable element (button > div > span)
-        // and one that's in the dropdown area (not at very top or bottom)
-        for (var r = 0; r < renameCandidates.length; r++) {
-          var cand = renameCandidates[r];
-          if (cand.rect.top > 20 && cand.rect.top < 400) {
-            renameBtn = cand.el;
-            addLog('Found Rename: tag=' + renameBtn.tagName + ' y=' + Math.round(cand.rect.top));
-            break;
-          }
-        }
-        if (!renameBtn) renameBtn = renameCandidates[0].el;
-      }
-
-      if (!renameBtn) {
-        // Debug: log what menu items we CAN see
-        var debugItems = document.querySelectorAll('[role="menuitem"], [role="option"]');
-        addLog('WARNING: No Rename found. Menu items: ' + debugItems.length +
-               '. Trying click on elements with rename-like text...');
-        // Last resort: look for elements with textContent containing 'rename'
-        var spans = document.querySelectorAll('span, div, p, button, a');
-        for (var k = 0; k < spans.length; k++) {
-          var sp = spans[k];
-          if (sp.closest('#pb-panel')) continue;
-          var spRect = sp.getBoundingClientRect();
-          if (spRect.width === 0 || spRect.top < 20 || spRect.top > 400) continue;
-          var spText = (sp.textContent || '').trim().toLowerCase();
-          if (spText.indexOf('rename') !== -1 && spText.length < 30) {
-            renameBtn = sp;
-            addLog('Found Rename (contains): "' + spText + '" tag=' + sp.tagName);
-            break;
-          }
-        }
-      }
-
-      if (!renameBtn) {
-        addLog('WARNING: Could not find Rename option. Closing menu.');
-        document.body.click();
+      if (!editableInput) {
+        addLog('WARNING: Title did not become editable. Skipping.');
+        document.body.click(); // close any dropdown that may have opened
         return;
       }
 
-      renameBtn.click();
-      addLog('Clicked Rename.');
+      addLog('Title is editable. Typing new name...');
+      editableInput.focus();
 
-      // Step 3: Wait for editable title field, type the name
+      if (editableInput.tagName === 'INPUT') {
+        // Select all existing text, then replace
+        editableInput.select();
+        var nativeSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, 'value'
+        ).set;
+        nativeSetter.call(editableInput, name);
+        editableInput.dispatchEvent(new Event('input', { bubbles: true }));
+        editableInput.dispatchEvent(new Event('change', { bubbles: true }));
+      } else {
+        // contenteditable: select all then replace
+        var sel = window.getSelection();
+        var range = document.createRange();
+        range.selectNodeContents(editableInput);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        document.execCommand('insertText', false, name);
+      }
+
+      // Step 4: Click outside to save
       setTimeout(function () {
-        // Look for an editable input that appeared in the title area
-        var editableInput = null;
-        var inputs = document.querySelectorAll('input[type="text"], input:not([type]), [contenteditable="true"]');
-        for (var i = 0; i < inputs.length; i++) {
-          var inp = inputs[i];
-          var rect = inp.getBoundingClientRect();
-          if (rect.top < 60 && rect.left > 100 && rect.width > 50 && !inp.closest('#pb-panel')) {
-            editableInput = inp;
-            break;
-          }
-        }
-
-        if (!editableInput) {
-          addLog('WARNING: Could not find editable title field. Skipping.');
-          return;
-        }
-
-        editableInput.focus();
-        if (editableInput.tagName === 'INPUT') {
-          var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-          nativeSetter.call(editableInput, name);
-          editableInput.dispatchEvent(new Event('input', { bubbles: true }));
-          editableInput.dispatchEvent(new Event('change', { bubbles: true }));
-        } else {
-          // contenteditable
-          var sel = window.getSelection();
-          var range = document.createRange();
-          range.selectNodeContents(editableInput);
-          sel.removeAllRanges();
-          sel.addRange(range);
-          document.execCommand('insertText', false, name);
-        }
-
-        // Click outside to save (just click anywhere on the page)
-        setTimeout(function () {
-          editableInput.blur();
-          // Click on the main content area to close the rename
-          var mainArea = document.querySelector('main') || document.body;
-          mainArea.click();
-          addLog('Conversation renamed to: ' + name);
-        }, 500);
-      }, 800);  // wait a bit longer for the edit field to appear
-    }, 700);  // wait a bit longer for the dropdown to appear
+        editableInput.blur();
+        var mainArea = document.querySelector('main') || document.body;
+        mainArea.click();
+        addLog('Renamed to: ' + name);
+      }, 500);
+    }, 800);
   }
 
   // ============================================================
