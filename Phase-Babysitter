@@ -570,6 +570,116 @@
   // REPO DROPDOWN SELECTION (Claude Code Web)
   // ============================================================
 
+  function activateNewSessionInput(callback) {
+    // The "Ask Claude to write code..." input is always in the top-left sidebar
+    // but it may not be an active contenteditable until clicked/focused.
+    // We need to find it and click it to activate it.
+    addLog('Activating "Ask Claude" input...');
+
+    // Look for the sidebar input area — it's in the top-left (x < 300, y < 150)
+    // Could be a div, contenteditable, textarea, or just a clickable placeholder
+    var sidebarArea = null;
+
+    // Strategy 1: Find any element with "Ask Claude" or "write code" text/placeholder
+    var allEls = document.querySelectorAll('*');
+    for (var i = 0; i < allEls.length; i++) {
+      var el = allEls[i];
+      if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
+      var rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      if (rect.left > 350 || rect.top > 200) continue; // sidebar only
+
+      var ph = (el.getAttribute('data-placeholder') || '').toLowerCase();
+      var ph2 = (el.getAttribute('placeholder') || '').toLowerCase();
+      var ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+
+      if (ph.indexOf('ask') !== -1 || ph.indexOf('write code') !== -1 || ph.indexOf('claude') !== -1 ||
+          ph2.indexOf('ask') !== -1 || ph2.indexOf('write code') !== -1 || ph2.indexOf('claude') !== -1 ||
+          ariaLabel.indexOf('ask') !== -1 || ariaLabel.indexOf('write code') !== -1) {
+        sidebarArea = el;
+        addLog('Found "Ask Claude" element by placeholder/aria: tag=' + el.tagName + ' y=' + Math.round(rect.top));
+        break;
+      }
+    }
+
+    // Strategy 2: Find contenteditable or tiptap in the sidebar area
+    if (!sidebarArea) {
+      var editors = document.querySelectorAll(
+        '.ProseMirror, .tiptap, [contenteditable="true"], textarea, input[type="text"]'
+      );
+      for (var j = 0; j < editors.length; j++) {
+        var ed = editors[j];
+        if (ed.closest('#pb-panel') || ed.closest('#pb-toggle')) continue;
+        var edRect = ed.getBoundingClientRect();
+        // Must be in the sidebar area (left side, upper portion)
+        if (edRect.left < 300 && edRect.top < 200 && edRect.width > 50 && edRect.height > 10) {
+          sidebarArea = ed;
+          addLog('Found sidebar editor: tag=' + ed.tagName + ' class="' + (ed.className || '').substring(0, 30) + '" y=' + Math.round(edRect.top));
+          break;
+        }
+      }
+    }
+
+    // Strategy 3: Look for a clickable container in the top-left that looks like an input
+    if (!sidebarArea) {
+      var containers = document.querySelectorAll('div, section, form');
+      for (var k = 0; k < containers.length; k++) {
+        var c = containers[k];
+        if (c.closest('#pb-panel') || c.closest('#pb-toggle')) continue;
+        var cRect = c.getBoundingClientRect();
+        // Looking for a box-like element in the sidebar (width 150-350, height 30-150)
+        if (cRect.left < 300 && cRect.top < 150 && cRect.width > 150 && cRect.width < 350 &&
+            cRect.height > 30 && cRect.height < 150) {
+          // Check if it contains an input-like child or has cursor:text style
+          var hasInput = c.querySelector('[contenteditable], textarea, input, .ProseMirror, .tiptap');
+          if (hasInput && !hasInput.closest('#pb-panel')) {
+            sidebarArea = hasInput;
+            addLog('Found sidebar input container: tag=' + hasInput.tagName + ' y=' + Math.round(cRect.top));
+            break;
+          }
+        }
+      }
+    }
+
+    if (!sidebarArea) {
+      addLog('WARNING: Could not find "Ask Claude" input area. Will use Reply box as fallback.');
+      if (callback) callback();
+      return;
+    }
+
+    // Click it to activate/focus
+    sidebarArea.click();
+    sidebarArea.focus();
+    addLog('Clicked sidebar input to activate.');
+
+    // Wait for it to become a proper contenteditable
+    var pollCount = 0;
+    function waitForActive() {
+      pollCount++;
+      // Check if there's now an active contenteditable in the sidebar area
+      var editors = document.querySelectorAll(
+        '.ProseMirror[contenteditable="true"], .tiptap[contenteditable="true"], div[contenteditable="true"]'
+      );
+      for (var m = 0; m < editors.length; m++) {
+        var ed = editors[m];
+        if (ed.closest('#pb-panel')) continue;
+        var edRect = ed.getBoundingClientRect();
+        if (edRect.left < 350 && edRect.top < 200 && edRect.width > 50) {
+          addLog('"Ask Claude" input is now active at y=' + Math.round(edRect.top));
+          setTimeout(function () { if (callback) callback(); }, 500);
+          return;
+        }
+      }
+      if (pollCount >= 10) {
+        addLog('WARNING: "Ask Claude" input did not activate. Proceeding anyway.');
+        if (callback) callback();
+        return;
+      }
+      setTimeout(waitForActive, 300);
+    }
+    setTimeout(waitForActive, 300);
+  }
+
   function selectRepoInDropdown(repoName, callback) {
     if (!repoName) {
       addLog('No repo name set. Skipping repo selection.');
@@ -979,9 +1089,15 @@
     }
 
     if (shouldSelectRepo) {
+      // Step 1: Select repo from dropdown
+      // Step 2: Click inside "Ask Claude" sidebar input to activate it
+      // Step 3: Paste text and hit send
       selectRepoInDropdown(repoName, function () {
         if (runnerState !== 'running') return;
-        injectAndSend();
+        activateNewSessionInput(function () {
+          if (runnerState !== 'running') return;
+          injectAndSend();
+        });
       });
     } else {
       injectAndSend();
