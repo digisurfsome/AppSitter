@@ -113,8 +113,32 @@
     ];
 
     // If we want the new-session "Ask Claude to write code..." input,
-    // look for it specifically first by checking placeholder text
+    // use the stored reference from activateNewSessionInput if available
     if (preferNewSession) {
+      // First check: stored reference from activateNewSessionInput
+      if (window._pbSidebarInput) {
+        el = window._pbSidebarInput;
+        var sRect = el.getBoundingClientRect();
+        if (sRect.width > 0 && sRect.height > 0) {
+          var sType = (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') ? 'textarea' : 'prosemirror';
+          addLog('Using stored sidebar input: tag=' + el.tagName + ' y=' + Math.round(sRect.top));
+          return { el: el, type: sType };
+        }
+      }
+
+      // Fallback: search for textarea or input in sidebar area
+      var sidebarInputs = document.querySelectorAll('textarea, input[type="text"]');
+      for (var si = 0; si < sidebarInputs.length; si++) {
+        el = sidebarInputs[si];
+        if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
+        var siRect = el.getBoundingClientRect();
+        if (siRect.left < 350 && siRect.top < 200 && siRect.width > 50) {
+          addLog('Found sidebar textarea at y=' + Math.round(siRect.top));
+          return { el: el, type: 'textarea' };
+        }
+      }
+
+      // Also check contenteditables with placeholder text
       var allEditable = document.querySelectorAll(
         '.ProseMirror[contenteditable="true"], div[data-placeholder][contenteditable="true"], div[contenteditable="true"]'
       );
@@ -123,20 +147,8 @@
         if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
         var rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) continue;
-        var ph = (el.getAttribute('data-placeholder') || '').toLowerCase();
-        // Match the "Ask Claude to write code..." placeholder
-        if (ph.indexOf('ask') !== -1 || ph.indexOf('write code') !== -1 || ph.indexOf('claude') !== -1) {
-          addLog('Found new-session input: placeholder="' + ph.substring(0, 50) + '"');
-          return { el: el, type: 'prosemirror' };
-        }
-      }
-      // Also check: the new-session input is typically near the TOP of the page
-      for (var m = 0; m < allEditable.length; m++) {
-        el = allEditable[m];
-        if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
-        var mRect = el.getBoundingClientRect();
-        if (mRect.width > 0 && mRect.height > 0 && mRect.top < 200) {
-          addLog('Found top-area editor at y=' + Math.round(mRect.top));
+        if (rect.left < 350 && rect.top < 200) {
+          addLog('Found top-area editor at y=' + Math.round(rect.top));
           return { el: el, type: 'prosemirror' };
         }
       }
@@ -652,13 +664,22 @@
     sidebarArea.focus();
     addLog('Clicked sidebar input to activate.');
 
-    // Wait for it to become a proper contenteditable
+    // If it's already a textarea or contenteditable, it's already active — proceed
+    var tag = sidebarArea.tagName.toLowerCase();
+    if (tag === 'textarea' || tag === 'input' || sidebarArea.getAttribute('contenteditable') === 'true') {
+      addLog('"Ask Claude" input is active (tag=' + tag + '). Ready.');
+      // Store reference so getEditor can find it
+      window._pbSidebarInput = sidebarArea;
+      setTimeout(function () { if (callback) callback(); }, 500);
+      return;
+    }
+
+    // Otherwise wait for it to become a proper contenteditable
     var pollCount = 0;
     function waitForActive() {
       pollCount++;
-      // Check if there's now an active contenteditable in the sidebar area
       var editors = document.querySelectorAll(
-        '.ProseMirror[contenteditable="true"], .tiptap[contenteditable="true"], div[contenteditable="true"]'
+        '.ProseMirror[contenteditable="true"], .tiptap[contenteditable="true"], div[contenteditable="true"], textarea'
       );
       for (var m = 0; m < editors.length; m++) {
         var ed = editors[m];
@@ -666,6 +687,7 @@
         var edRect = ed.getBoundingClientRect();
         if (edRect.left < 350 && edRect.top < 200 && edRect.width > 50) {
           addLog('"Ask Claude" input is now active at y=' + Math.round(edRect.top));
+          window._pbSidebarInput = ed;
           setTimeout(function () { if (callback) callback(); }, 500);
           return;
         }
