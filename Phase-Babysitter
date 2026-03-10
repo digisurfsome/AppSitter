@@ -1211,7 +1211,7 @@
 
     var sub = document.createElement('div');
     sub.style.cssText = 'color:#999;font-size:14px;margin-top:12px;font-family:system-ui,sans-serif;';
-    sub.textContent = 'The page will refresh when your Github Repository has been created';
+    sub.textContent = 'The page timer will refresh the page when your Github repository has been created';
 
     overlay.appendChild(msg);
     overlay.appendChild(countdown);
