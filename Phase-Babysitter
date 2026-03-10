@@ -387,6 +387,15 @@
       };
     }
 
+    function doFetch() {
+      return fetch(url, { method: method, headers: headers, body: body })
+        .then(function (resp) {
+          return resp.text().then(function (text) {
+            return wrapResponse(resp.status, text);
+          });
+        });
+    }
+
     // Try GM_xmlhttpRequest / GM.xmlHttpRequest first (cross-origin), fall back to fetch
     var gmXhr = (typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest
               : (typeof GM !== 'undefined' && GM && typeof GM.xmlHttpRequest === 'function') ? GM.xmlHttpRequest.bind(GM)
@@ -401,19 +410,13 @@
           data: body,
           timeout: 15000,
           onload: function (resp) { resolve(wrapResponse(resp.status, resp.responseText)); },
-          onerror: function (err) { reject(new Error('GM_xmlhttpRequest error: ' + JSON.stringify(err))); },
-          ontimeout: function () { reject(new Error('Request timed out')); }
+          onerror: function () { resolve(doFetch()); },
+          ontimeout: function () { resolve(doFetch()); }
         });
       });
     }
 
-    // Fallback: regular fetch
-    return fetch(url, { method: method, headers: headers, body: body })
-      .then(function (resp) {
-        return resp.text().then(function (text) {
-          return wrapResponse(resp.status, text);
-        });
-      });
+    return doFetch();
   }
 
   function slugify(name) {
