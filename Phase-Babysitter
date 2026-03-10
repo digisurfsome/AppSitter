@@ -78,24 +78,97 @@
     el.click();
   }
 
+  // Find the React fiber attached to a DOM element
+  function getReactFiber(el) {
+    if (!el) return null;
+    var keys = Object.keys(el);
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i].indexOf('__reactFiber$') === 0 || keys[i].indexOf('__reactInternalInstance$') === 0) {
+        return el[keys[i]];
+      }
+    }
+    return null;
+  }
+
+  // Find React props on a DOM element
+  function getReactProps(el) {
+    if (!el) return null;
+    var keys = Object.keys(el);
+    for (var i = 0; i < keys.length; i++) {
+      if (keys[i].indexOf('__reactProps$') === 0) {
+        return el[keys[i]];
+      }
+    }
+    return null;
+  }
+
+  // Walk up the DOM tree looking for React click/pointer handlers, then call them
+  function reactClick(el) {
+    if (!el) return false;
+    var handlersCalled = [];
+    var current = el;
+    // Walk up to 8 ancestors looking for handlers
+    for (var depth = 0; depth < 8 && current && current !== document.body; depth++) {
+      var props = getReactProps(current);
+      if (props) {
+        var rect = current.getBoundingClientRect();
+        var fakeEvent = {
+          type: 'click', target: el, currentTarget: current, bubbles: true,
+          cancelable: true, defaultPrevented: false, isTrusted: true,
+          clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
+          button: 0, buttons: 0, detail: 1,
+          preventDefault: function () { this.defaultPrevented = true; },
+          stopPropagation: function () {},
+          nativeEvent: new MouseEvent('click', { bubbles: true })
+        };
+        // Try all common handler names
+        var handlers = ['onClick', 'onPointerUp', 'onPointerDown', 'onMouseUp', 'onMouseDown',
+                        'onSelect', 'onAction'];
+        for (var hi = 0; hi < handlers.length; hi++) {
+          if (typeof props[handlers[hi]] === 'function') {
+            try {
+              props[handlers[hi]](fakeEvent);
+              handlersCalled.push(handlers[hi] + '@depth' + depth + '(' + current.tagName + ')');
+            } catch (e) {
+              handlersCalled.push(handlers[hi] + '@depth' + depth + ':ERR:' + e.message.substring(0, 30));
+            }
+          }
+        }
+      }
+      current = current.parentElement;
+    }
+    if (handlersCalled.length > 0) {
+      addLog('reactClick fired: ' + handlersCalled.join(', '));
+      return true;
+    }
+    return false;
+  }
+
   // Clicks at specific screen coordinates, letting the browser route to the right element.
-  // This works even when the visual element isn't the one with the event handler
-  // (React portals, overlay layers, etc.)
   function clickAtCoordinates(x, y) {
     var target = document.elementFromPoint(x, y);
+    addLog('DEBUG clickAtCoords: (' + Math.round(x) + ',' + Math.round(y) + ') -> ' +
+           (target ? target.tagName + '.' + (target.className || '').substring(0, 25) : 'null'));
+    if (!target) return;
+
+    // Try React internal handlers first (most reliable for React UIs)
+    var reactHandled = reactClick(target);
+
+    // Also dispatch DOM events as backup
     var commonInit = {
       bubbles: true, cancelable: true, view: window,
       clientX: x, clientY: y, screenX: x, screenY: y,
       button: 0, buttons: 1
     };
-    addLog('DEBUG clickAtCoords: (' + Math.round(x) + ',' + Math.round(y) + ') -> ' +
-           (target ? target.tagName + '.' + (target.className || '').substring(0, 25) : 'null'));
-    if (!target) return;
     target.dispatchEvent(new PointerEvent('pointerdown', commonInit));
     target.dispatchEvent(new MouseEvent('mousedown', commonInit));
     target.dispatchEvent(new PointerEvent('pointerup', commonInit));
     target.dispatchEvent(new MouseEvent('mouseup', commonInit));
     target.dispatchEvent(new MouseEvent('click', commonInit));
+
+    if (!reactHandled) {
+      addLog('No React handlers found on target — DOM events only');
+    }
   }
 
   // ============================================================
@@ -1043,13 +1116,40 @@
           addLog('WARNING: No dropdown match found for "' + repoName + '"');
         }
 
-        if (matchRect) {
-          // PRIMARY: Click at the exact screen coordinates of the dropdown result.
-          // Use document.elementFromPoint to find the real target (handles portals/overlays)
+        if (matchEl) {
+          // PRIMARY: Try React internal handler invocation on matched element + ancestors.
+          // This bypasses the DOM event system entirely and calls React's handlers directly.
+          addLog('Trying reactClick on matched element...');
+          var handled = reactClick(matchEl);
+
+          // Also try coordinate-based approach as backup
           var cx = matchRect.left + matchRect.width / 2;
           var cy = matchRect.top + matchRect.height / 2;
-          addLog('Clicking dropdown result at coords (' + Math.round(cx) + ',' + Math.round(cy) + ')...');
+          addLog('Also trying coordinate click at (' + Math.round(cx) + ',' + Math.round(cy) + ')...');
           clickAtCoordinates(cx, cy);
+
+          // Also scan ALL elements at the match location and try reactClick on each
+          // (the visual element might differ from the one with the handler)
+          var pointEl = document.elementFromPoint(cx, cy);
+          if (pointEl && pointEl !== matchEl) {
+            addLog('elementFromPoint differs from match! Trying reactClick on pointEl too...');
+            reactClick(pointEl);
+          }
+
+          // Debug: dump React props found on elements in the area
+          var scanEl = matchEl;
+          for (var sd = 0; sd < 5 && scanEl && scanEl !== document.body; sd++) {
+            var rp = getReactProps(scanEl);
+            if (rp) {
+              var propNames = Object.keys(rp).filter(function(k) {
+                return typeof rp[k] === 'function' || k.indexOf('on') === 0;
+              });
+              addLog('DEBUG ReactProps depth=' + sd + ' tag=' + scanEl.tagName +
+                     ' class="' + (scanEl.className || '').substring(0, 20) + '"' +
+                     ' handlers=[' + propNames.join(',') + ']');
+            }
+            scanEl = scanEl.parentElement;
+          }
         }
 
         // Check if it worked after a short delay
@@ -1062,9 +1162,8 @@
             }
           }
 
-          if (stillOpen && matchRect) {
-            // Retry 1: Try keyboard ArrowDown + Enter
-            addLog('Dropdown still open — trying keyboard ArrowDown+Enter...');
+          if (stillOpen && matchEl) {
+            addLog('Dropdown still open after React+coord clicks. Trying keyboard...');
             searchInput.focus();
             searchInput.dispatchEvent(new KeyboardEvent('keydown', {
               key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40,
@@ -1076,7 +1175,6 @@
                 bubbles: true, cancelable: true
               }));
 
-              // Check again
               setTimeout(function () {
                 var still2 = false;
                 if (searchInput) {
@@ -1084,28 +1182,16 @@
                   if (si2.width > 0 && si2.height > 0) still2 = true;
                 }
                 if (still2) {
-                  // Retry 2: Try robustClick on element + parent + grandparent
-                  addLog('Still open — trying robustClick on match + ancestors...');
-                  if (matchEl) {
-                    robustClick(matchEl);
-                    if (matchEl.parentElement) robustClick(matchEl.parentElement);
-                    if (matchEl.parentElement && matchEl.parentElement.parentElement) {
-                      robustClick(matchEl.parentElement.parentElement);
-                    }
-                  }
-                  // Force close
+                  addLog('All click methods failed. Force closing dropdown...');
+                  searchInput.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
+                    bubbles: true, cancelable: true
+                  }));
+                  document.body.click();
                   setTimeout(function () {
-                    searchInput.dispatchEvent(new KeyboardEvent('keydown', {
-                      key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
-                      bubbles: true, cancelable: true
-                    }));
-                    document.body.click();
-                    addLog('Repo selection forced close. Waiting to settle...');
-                    setTimeout(function () {
-                      addLog('Ready for injection.');
-                      if (callback) callback();
-                    }, 1500);
-                  }, 300);
+                    addLog('Ready for injection (forced close).');
+                    if (callback) callback();
+                  }, 1500);
                 } else {
                   addLog('Selected repo: ' + repoName + ' (keyboard)');
                   setTimeout(function () {
