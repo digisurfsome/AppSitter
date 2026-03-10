@@ -654,11 +654,44 @@
         if (!found) {
           addLog('WARNING: Could not find "' + repoName + '" in dropdown. Closing.');
           document.body.click();
+          setTimeout(function () {
+            if (callback) callback();
+          }, REPO_CLICK_DELAY);
+          return;
         }
 
-        setTimeout(function () {
-          if (callback) callback();
-        }, REPO_CLICK_DELAY);
+        // After clicking a repo, Claude Code Web navigates to a new conversation.
+        // We must wait for the URL to change and the new chat input to be ready.
+        var urlBefore = window.location.href;
+        var navPollCount = 0;
+        var NAV_POLL_MAX = 30; // up to 15 seconds
+        var NAV_POLL_INTERVAL = 500;
+
+        function waitForNewSession() {
+          navPollCount++;
+          var urlNow = window.location.href;
+          var urlChanged = urlNow !== urlBefore;
+          var hasEditor = !!getEditor();
+
+          if (urlChanged && hasEditor) {
+            addLog('New session ready. URL changed to: ' + urlNow.split('/').pop());
+            setTimeout(function () {
+              if (callback) callback();
+            }, 1000); // extra 1s buffer for UI to fully settle
+            return;
+          }
+
+          if (navPollCount >= NAV_POLL_MAX) {
+            addLog('WARNING: Timed out waiting for new session. Proceeding anyway.');
+            if (callback) callback();
+            return;
+          }
+
+          setTimeout(waitForNewSession, NAV_POLL_INTERVAL);
+        }
+
+        // Start polling after a short initial delay
+        setTimeout(waitForNewSession, REPO_CLICK_DELAY);
       }, REPO_SEARCH_DELAY);
     }, REPO_SELECT_TIMEOUT);
   }
@@ -819,9 +852,10 @@
     saveState();
     refreshUI();
 
-    // Step 1: Auto-select repo in dropdown (always on when repo name is set)
+    // Step 1: Auto-select repo in dropdown (only on first phase to start a new session)
+    // Subsequent phases continue in the same conversation
     var repoName = getRepoName();
-    var shouldSelectRepo = repoName && SITE === 'claude';
+    var shouldSelectRepo = repoName && SITE === 'claude' && currentPhaseIndex === 0;
 
     function injectAndSend() {
       addLog('Injecting Phase ' + phase.number + '...');
