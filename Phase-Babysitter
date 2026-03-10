@@ -1256,8 +1256,12 @@
             }).catch(function () {});
           }
         } catch (e) {}
-        // Let cache clearing finish, then hard reload (true = bypass HTTP cache)
-        setTimeout(function () { location.reload(true); }, 300);
+        // Navigate to Claude Code home page (not reload current conversation)
+        // so repo selection starts from a clean new-session state
+        setTimeout(function () {
+          var base = window.location.origin + '/code';
+          window.location.href = base;
+        }, 300);
       } else {
         countdownSpan.textContent = remaining;
       }
