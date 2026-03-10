@@ -1211,7 +1211,7 @@
 
     var sub = document.createElement('div');
     sub.style.cssText = 'color:#999;font-size:14px;margin-top:12px;font-family:system-ui,sans-serif;';
-    sub.textContent = 'Page will refresh so your new repo appears in the dropdown';
+    sub.textContent = 'The page will refresh when your Github Repository has been created';
 
     overlay.appendChild(msg);
     overlay.appendChild(countdown);
@@ -2073,7 +2073,7 @@
             appNameInput.value = '';
 
             // Show countdown overlay then refresh so new repo appears in dropdown
-            showRefreshCountdown(2, 'Loading new repo: ' + appName);
+            showRefreshCountdown(4, 'Loading new repo: ' + appName);
           });
         } else {
           return resp.json().then(function (err) {
