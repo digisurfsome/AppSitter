@@ -1070,13 +1070,6 @@
       '.pb-toggle-group .pb-btn:last-child {',
       '  border-radius:0 5px 5px 0;',
       '}',
-      '.pb-token-display {',
-      '  display:flex;align-items:center;gap:8px;',
-      '  padding:6px 8px;background:#262624;border-radius:4px;font-size:11px;',
-      '}',
-      '.pb-token-mask {',
-      '  color:#e0e0e0;font-family:"SF Mono","Fira Code",Consolas,monospace;flex:1;',
-      '}',
       '.pb-token-user {',
       '  color:#4caf50;font-size:10px;font-weight:600;',
       '}'
@@ -1177,69 +1170,111 @@
     body.className = 'pb-body';
 
     // ==============================================================
-    // Section: GitHub Token
+    // Section: GitHub Token (collapsed when saved)
     // ==============================================================
     var tokenSection = document.createElement('div');
     tokenSection.className = 'pb-section';
-    var tokenTitle = document.createElement('div');
-    tokenTitle.className = 'pb-section-title';
-    tokenTitle.textContent = 'GitHub Token';
-    tokenSection.appendChild(tokenTitle);
 
-    var tokenReadMore = document.createElement('span');
-    tokenReadMore.className = 'pb-readmore';
-    tokenReadMore.textContent = 'Read more \u25BC';
-    tokenSection.appendChild(tokenReadMore);
+    // --- Collapsed state: single button ---
+    var tokenCollapsed = document.createElement('div');
+    var tokenSetupBtn = document.createElement('button');
+    tokenSetupBtn.className = 'pb-btn';
+    tokenSetupBtn.style.cssText = 'width:100%;';
 
-    var tokenHelp = document.createElement('div');
-    tokenHelp.className = 'pb-github-info';
-    tokenHelp.textContent = 'Create a Personal Access Token at github.com \u2192 Settings \u2192 Developer settings \u2192 Personal access tokens \u2192 Fine-grained tokens. Grant "Contents" read/write and "Administration" read/write on your repos.';
-    tokenSection.appendChild(tokenHelp);
+    // --- Expanded state: step-by-step setup ---
+    var tokenExpanded = document.createElement('div');
+    tokenExpanded.style.display = 'none';
 
-    // Token input area (shown when no token or editing)
-    var tokenInputWrap = document.createElement('div');
+    var tokenStepTitle = document.createElement('div');
+    tokenStepTitle.className = 'pb-section-title';
+    tokenStepTitle.textContent = 'GitHub Token';
+    tokenExpanded.appendChild(tokenStepTitle);
+
+    // Token input row: input + "?" help button
+    var tokenInputRow = document.createElement('div');
+    tokenInputRow.style.cssText = 'display:flex;gap:6px;align-items:center;';
     var tokenInput = document.createElement('input');
     tokenInput.className = 'pb-input';
     tokenInput.type = 'password';
-    tokenInput.placeholder = 'ghp_xxxxxxxxxxxxxxxxxxxx';
+    tokenInput.placeholder = 'Paste your token here';
+    tokenInput.style.flex = '1';
+    var tokenHelpBtn = document.createElement('button');
+    tokenHelpBtn.className = 'pb-btn';
+    tokenHelpBtn.textContent = 'How To Get Token';
+    tokenHelpBtn.title = 'Step-by-step instructions';
+    tokenHelpBtn.style.cssText = 'white-space:nowrap;font-size:10px;padding:6px 8px;';
+    tokenInputRow.appendChild(tokenInput);
+    tokenInputRow.appendChild(tokenHelpBtn);
+    tokenExpanded.appendChild(tokenInputRow);
+
+    // Step-by-step instructions (hidden by default, shown on ? click)
+    var steps = [
+      '1. Go to github.com and log in',
+      '2. Click your profile pic (top-right) \u2192 Settings',
+      '3. Scroll to Developer settings (bottom-left)',
+      '4. Personal access tokens \u2192 Fine-grained tokens',
+      '5. Click "Generate new token"',
+      '6. Name it "AppSitter", set expiration',
+      '7. Under Repository permissions, grant:',
+      '   \u2022 Contents: Read and write',
+      '   \u2022 Administration: Read and write',
+      '8. Click "Generate token" and copy it'
+    ];
+    var stepsList = document.createElement('div');
+    stepsList.style.cssText = 'color:#bbb;font-size:10px;line-height:1.6;padding:6px 8px;background:#232321;border-radius:4px;border-left:2px solid #da7757;margin-top:6px;white-space:pre-wrap;display:none;';
+    stepsList.textContent = steps.join('\n');
+    tokenExpanded.appendChild(stepsList);
+
+    // Button row: Save & Verify + Cancel
+    var tokenBtnRow = document.createElement('div');
+    tokenBtnRow.style.cssText = 'display:flex;gap:6px;margin-top:6px;';
     var tokenSaveBtn = document.createElement('button');
-    tokenSaveBtn.className = 'pb-btn';
-    tokenSaveBtn.textContent = 'Save';
-    tokenSaveBtn.style.marginTop = '4px';
-    tokenInputWrap.appendChild(tokenInput);
-    tokenInputWrap.appendChild(tokenSaveBtn);
+    tokenSaveBtn.className = 'pb-btn pb-btn-primary';
+    tokenSaveBtn.textContent = 'Save & Verify';
+    tokenSaveBtn.style.flex = '1';
+    var tokenCancelBtn = document.createElement('button');
+    tokenCancelBtn.className = 'pb-btn';
+    tokenCancelBtn.textContent = 'Cancel';
+    tokenBtnRow.appendChild(tokenSaveBtn);
+    tokenBtnRow.appendChild(tokenCancelBtn);
+    tokenExpanded.appendChild(tokenBtnRow);
 
-    // Token display area (shown when token exists)
-    var tokenDisplayWrap = document.createElement('div');
-    tokenDisplayWrap.style.display = 'none';
-    var tokenDisplayRow = document.createElement('div');
-    tokenDisplayRow.className = 'pb-token-display';
-    var tokenMask = document.createElement('span');
-    tokenMask.className = 'pb-token-mask';
-    var tokenChangeBtn = document.createElement('button');
-    tokenChangeBtn.className = 'pb-btn';
-    tokenChangeBtn.textContent = 'Change';
-    tokenChangeBtn.style.cssText = 'padding:3px 8px;font-size:10px;';
-    tokenDisplayRow.appendChild(tokenMask);
-    tokenDisplayRow.appendChild(tokenChangeBtn);
-    tokenDisplayWrap.appendChild(tokenDisplayRow);
-    var tokenUserEl = document.createElement('div');
-    tokenUserEl.className = 'pb-token-user';
-    tokenUserEl.style.marginTop = '4px';
-    tokenDisplayWrap.appendChild(tokenUserEl);
-
-    tokenSection.appendChild(tokenInputWrap);
-    tokenSection.appendChild(tokenDisplayWrap);
+    tokenSection.appendChild(tokenCollapsed);
+    tokenSection.appendChild(tokenExpanded);
 
     // Show correct state on load
     var existingToken = getGitHubToken();
     var existingUser = getGitHubUser();
-    if (existingToken) {
-      tokenInputWrap.style.display = 'none';
-      tokenDisplayWrap.style.display = 'block';
-      var masked = existingToken.substring(0, 4) + '****...' + existingToken.substring(existingToken.length - 4);
-      tokenMask.textContent = masked;
-      tokenUserEl.textContent = existingUser ? 'Authenticated as: ' + existingUser : '';
+
+    function showTokenCollapsed() {
+      tokenExpanded.style.display = 'none';
+      tokenCollapsed.style.display = 'block';
+      if (getGitHubToken()) {
+        var user = getGitHubUser();
+        tokenSetupBtn.textContent = 'Replace GitHub Token' + (user ? ' (' + user + ')' : '');
+        tokenSetupBtn.className = 'pb-btn';
+      } else {
+        tokenSetupBtn.textContent = 'Setup GitHub Token';
+        tokenSetupBtn.className = 'pb-btn pb-btn-primary';
+      }
+    }
+
+    function showTokenExpanded() {
+      tokenCollapsed.style.display = 'none';
+      tokenExpanded.style.display = 'block';
+      tokenInput.value = '';
+      tokenInput.focus();
+    }
+
+    tokenCollapsed.appendChild(tokenSetupBtn);
+
+    // On first load with no token, show setup expanded with instructions
+    if (!existingToken) {
+      showTokenExpanded();
+      stepsList.style.display = 'block';
+      tokenHelpBtn.textContent = 'Hide Steps';
+    } else {
+      showTokenCollapsed();
     }
 
     body.appendChild(tokenSection);
@@ -1515,10 +1550,29 @@
       readMoreLink.textContent = expanded ? 'Read less \u25B2' : 'Read more \u25BC';
     });
 
-    // Token read more toggle
-    tokenReadMore.addEventListener('click', function () {
-      var expanded = tokenHelp.classList.toggle('pb-expanded');
-      tokenReadMore.textContent = expanded ? 'Read less \u25B2' : 'Read more \u25BC';
+    // Token help button — toggle instructions
+    tokenHelpBtn.addEventListener('click', function () {
+      var visible = stepsList.style.display !== 'none';
+      stepsList.style.display = visible ? 'none' : 'block';
+      tokenHelpBtn.textContent = visible ? 'How To Get Token' : 'Hide Steps';
+    });
+
+    // Token setup button — expand to show setup
+    tokenSetupBtn.addEventListener('click', function () {
+      showTokenExpanded();
+      // Show instructions by default on first setup, hide on replace
+      if (getGitHubToken()) {
+        stepsList.style.display = 'none';
+        tokenHelpBtn.textContent = 'How To Get Token';
+      } else {
+        stepsList.style.display = 'block';
+        tokenHelpBtn.textContent = 'Hide Steps';
+      }
+    });
+
+    // Token cancel — collapse back
+    tokenCancelBtn.addEventListener('click', function () {
+      showTokenCollapsed();
     });
 
     // Token save — verify with GitHub API
@@ -1533,36 +1587,25 @@
       }).then(function (resp) {
         if (!resp.ok) {
           addLog('Invalid token (HTTP ' + resp.status + '). Check permissions.');
-          tokenSaveBtn.textContent = 'Save';
+          tokenSaveBtn.textContent = 'Save & Verify';
           tokenSaveBtn.disabled = false;
           return;
         }
         return resp.json().then(function (data) {
           saveGitHubToken(token);
           saveGitHubUser(data.login);
-          var masked = token.substring(0, 4) + '****...' + token.substring(token.length - 4);
-          tokenMask.textContent = masked;
-          tokenUserEl.textContent = 'Authenticated as: ' + data.login;
-          tokenInputWrap.style.display = 'none';
-          tokenDisplayWrap.style.display = 'block';
           tokenInput.value = '';
           createBtn.disabled = false;
           addLog('GitHub token verified. User: ' + data.login);
-          tokenSaveBtn.textContent = 'Save';
+          tokenSaveBtn.textContent = 'Save & Verify';
           tokenSaveBtn.disabled = false;
+          showTokenCollapsed();
         });
       }).catch(function () {
         addLog('Network error verifying token.');
-        tokenSaveBtn.textContent = 'Save';
+        tokenSaveBtn.textContent = 'Save & Verify';
         tokenSaveBtn.disabled = false;
       });
-    });
-
-    // Token change button
-    tokenChangeBtn.addEventListener('click', function () {
-      tokenDisplayWrap.style.display = 'none';
-      tokenInputWrap.style.display = 'block';
-      tokenInput.focus();
     });
 
     // App name slugify on blur
