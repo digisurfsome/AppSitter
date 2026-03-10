@@ -940,19 +940,46 @@
         return;
       }
 
-      // Step 3: Type the repo name into the search box
+      // Step 3: Type the repo name character-by-character with real keystrokes
+      // The native value setter doesn't trigger React's controlled input filtering,
+      // so we simulate actual typing to make the search/filter work properly.
       searchInput.focus();
-      var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-      nativeSetter.call(searchInput, repoName);
-      searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-      searchInput.dispatchEvent(new Event('change', { bubbles: true }));
-      addLog('Typed repo name: ' + repoName);
+      searchInput.value = '';
+      addLog('Typing repo name char-by-char: ' + repoName);
 
-      // Step 4: Wait for filtering, then select via keyboard (ArrowDown + Enter)
-      // Click-based selection doesn't work on Claude's Radix/React dropdown,
-      // so we use keyboard navigation which is the standard combobox pattern.
-      setTimeout(function () {
-        // DEBUG: Log all visible elements in the dropdown area so we can see the structure
+      var charIndex = 0;
+      function typeNextChar() {
+        if (charIndex >= repoName.length) {
+          addLog('Typed repo name: ' + repoName);
+          // Step 4: Wait for filtering to complete, then select with ArrowDown + Enter
+          setTimeout(function () { selectFirstResult(); }, REPO_SEARCH_DELAY);
+          return;
+        }
+        var ch = repoName[charIndex];
+        // Dispatch keydown, keypress, input, keyup — the full keystroke sequence
+        searchInput.dispatchEvent(new KeyboardEvent('keydown', {
+          key: ch, code: 'Key' + ch.toUpperCase(), keyCode: ch.charCodeAt(0),
+          bubbles: true, cancelable: true
+        }));
+        searchInput.dispatchEvent(new KeyboardEvent('keypress', {
+          key: ch, code: 'Key' + ch.toUpperCase(), keyCode: ch.charCodeAt(0),
+          charCode: ch.charCodeAt(0),
+          bubbles: true, cancelable: true
+        }));
+        // Actually insert the character into the input value
+        searchInput.value += ch;
+        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+        searchInput.dispatchEvent(new KeyboardEvent('keyup', {
+          key: ch, code: 'Key' + ch.toUpperCase(), keyCode: ch.charCodeAt(0),
+          bubbles: true, cancelable: true
+        }));
+        charIndex++;
+        // Small delay between characters to simulate real typing
+        setTimeout(typeNextChar, 50);
+      }
+
+      function selectFirstResult() {
+        // DEBUG: Log what's in the dropdown now
         var lowerName = repoName.toLowerCase();
         var debugEls = document.querySelectorAll('*');
         var dropdownDebug = [];
@@ -975,15 +1002,13 @@
         }
         addLog('DEBUG DROPDOWN: ' + dropdownDebug.length + ' matching els: ' + dropdownDebug.slice(0, 8).join(' | '));
 
+        // Primary approach: keyboard selection (ArrowDown + Enter)
         searchInput.focus();
-
-        // Press ArrowDown to highlight the first matching result
         searchInput.dispatchEvent(new KeyboardEvent('keydown', {
           key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40,
           bubbles: true, cancelable: true
         }));
 
-        // Short delay, then press Enter to confirm selection
         setTimeout(function () {
           searchInput.dispatchEvent(new KeyboardEvent('keydown', {
             key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
@@ -991,7 +1016,7 @@
           }));
           addLog('Selected repo: ' + repoName + ' (keyboard: ArrowDown+Enter)');
 
-          // Verify the dropdown closed after selection
+          // Check if dropdown closed
           setTimeout(function () {
             var stillOpen = false;
             if (searchInput) {
@@ -1002,11 +1027,9 @@
             }
 
             if (stillOpen) {
-              addLog('Dropdown still open after keyboard select — trying click fallback...');
-              // Try clicking the first visible item that matches
-              var lowerName = repoName.toLowerCase();
+              addLog('Dropdown still open — trying direct click on first match...');
+              // Last resort: find and click the first matching item
               var allEls = document.querySelectorAll('a, button, [role="option"], [role="menuitem"], div, li, span');
-              var clicked = false;
               for (var j = 0; j < allEls.length; j++) {
                 var cel = allEls[j];
                 if (cel.closest('#pb-panel') || cel.closest('#pb-toggle')) continue;
@@ -1015,22 +1038,16 @@
                     crect.width > 30 && crect.height > 10 && crect.height < 80) {
                   var celText = cel.textContent.trim().toLowerCase();
                   if (celText.indexOf(lowerName) !== -1 && celText.length < 100) {
-                    // Try every interaction method we can
                     robustClick(cel);
-                    // Also try clicking parent in case child span doesn't have handler
                     if (cel.parentElement && cel.parentElement.tagName !== 'BODY') {
                       robustClick(cel.parentElement);
                     }
-                    addLog('Clicked dropdown item: "' + cel.textContent.trim().substring(0, 40) + '" tag=' + cel.tagName);
-                    clicked = true;
+                    addLog('Clicked match: "' + cel.textContent.trim().substring(0, 40) + '" tag=' + cel.tagName);
                     break;
                   }
                 }
               }
-              if (!clicked) {
-                addLog('WARNING: Could not select repo. Pressing Escape to close dropdown.');
-              }
-              // Force close dropdown
+              // Force close
               searchInput.dispatchEvent(new KeyboardEvent('keydown', {
                 key: 'Escape', code: 'Escape', keyCode: 27, which: 27,
                 bubbles: true, cancelable: true
@@ -1044,7 +1061,7 @@
                 }, 1500);
               }, 300);
             } else {
-              addLog('Repo selected. Waiting for UI to settle...');
+              addLog('Repo selected successfully. Waiting for UI to settle...');
               setTimeout(function () {
                 addLog('Ready for injection.');
                 if (callback) callback();
@@ -1052,7 +1069,9 @@
             }
           }, 800);
         }, 300);
-      }, REPO_SEARCH_DELAY);
+      }
+
+      typeNextChar();
     }, REPO_SELECT_TIMEOUT);
   }
 
