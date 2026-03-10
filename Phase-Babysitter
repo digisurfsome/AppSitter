@@ -372,23 +372,43 @@
   function saveGitHubUser(u) { localStorage.setItem(STORAGE.githubUser, u); }
 
   function gmFetch(url, options) {
-    return new Promise(function (resolve, reject) {
-      GM_xmlhttpRequest({
-        method: options.method || 'GET',
-        url: url,
-        headers: options.headers || {},
-        data: options.body || null,
-        onload: function (resp) {
-          resolve({
-            ok: resp.status >= 200 && resp.status < 300,
-            status: resp.status,
-            json: function () { return Promise.resolve(JSON.parse(resp.responseText)); },
-            text: function () { return Promise.resolve(resp.responseText); }
-          });
-        },
-        onerror: function (err) { reject(err); }
+    options = options || {};
+    var method = options.method || 'GET';
+    var headers = options.headers || {};
+    var body = options.body || null;
+
+    function wrapResponse(status, responseText) {
+      return {
+        ok: status >= 200 && status < 300,
+        status: status,
+        json: function () { return Promise.resolve(JSON.parse(responseText)); },
+        text: function () { return Promise.resolve(responseText); }
+      };
+    }
+
+    // Try GM_xmlhttpRequest first (cross-origin), fall back to fetch
+    if (typeof GM_xmlhttpRequest === 'function') {
+      return new Promise(function (resolve, reject) {
+        GM_xmlhttpRequest({
+          method: method,
+          url: url,
+          headers: headers,
+          data: body,
+          timeout: 15000,
+          onload: function (resp) { resolve(wrapResponse(resp.status, resp.responseText)); },
+          onerror: function (err) { reject(err); },
+          ontimeout: function () { reject(new Error('Request timed out')); }
+        });
       });
-    });
+    }
+
+    // Fallback: regular fetch
+    return fetch(url, { method: method, headers: headers, body: body })
+      .then(function (resp) {
+        return resp.text().then(function (text) {
+          return wrapResponse(resp.status, text);
+        });
+      });
   }
 
   function slugify(name) {
