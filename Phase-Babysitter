@@ -1089,11 +1089,12 @@
     }
 
     if (shouldSelectRepo) {
-      // Step 1: Activate the sidebar "Ask Claude" input (click it to get cursor)
-      // Step 2: Select the repo in the dropdown
-      // Step 3: Inject text into the now-active sidebar input
-      activateNewSessionInput(function () {
-        selectRepoInDropdown(repoName, function () {
+      // Step 1: Select repo from dropdown
+      // Step 2: Click inside "Ask Claude" sidebar input to activate it
+      // Step 3: Paste text and hit send
+      selectRepoInDropdown(repoName, function () {
+        if (runnerState !== 'running') return;
+        activateNewSessionInput(function () {
           if (runnerState !== 'running') return;
           injectAndSend();
         });
