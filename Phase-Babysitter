@@ -896,11 +896,11 @@
       '/* Zoom header: big [-] | number | [+] */',
       '.pb-zoom-bar {',
       '  display:flex;align-items:stretch;',
-      '  background:#262624;border-bottom:1px solid #444;',
+      '  background:#262624;border-bottom:1px solid #da7757;',
       '  flex-shrink:0;min-height:36px;',
       '}',
       '.pb-zoom-btn {',
-      '  flex:1;background:none;border:none;color:#fff;',
+      '  flex:1;background:none;border:none;color:#da7757;',
       '  cursor:pointer;font-size:20px;font-weight:700;',
       '  transition:background 0.15s;display:flex;',
       '  align-items:center;justify-content:center;',
@@ -918,7 +918,7 @@
       '/* Status bar: left=Idle+count, center=AppSitter, right=claude+minimize */',
       '.pb-status-bar {',
       '  display:flex;align-items:center;justify-content:space-between;',
-      '  padding:8px 14px;background:#232321;border-bottom:1px solid #333;',
+      '  padding:8px 14px;background:#232321;border-bottom:1px solid #da7757;',
       '  flex-shrink:0;',
       '}',
       '.pb-status-left {',
@@ -947,7 +947,7 @@
       '}',
       '',
       '.pb-section {',
-      '  padding:10px 14px;border-bottom:1px solid #333;',
+      '  padding:10px 14px;border-bottom:1px solid #da7757;',
       '}',
       '.pb-section-title {',
       '  color:#aaa;font-size:10px;font-weight:600;text-transform:uppercase;',
@@ -1041,13 +1041,13 @@
       '.pb-phase-content.pb-expanded { display:block; }',
       '',
       '.pb-controls {',
-      '  display:flex;gap:6px;padding:10px 14px;border-top:1px solid #333;',
+      '  display:flex;gap:6px;padding:10px 14px;border-top:1px solid #da7757;',
       '  background:#232321;flex-shrink:0;flex-wrap:wrap;',
       '}',
       '',
       '.pb-log {',
       '  max-height:120px;overflow-y:auto;padding:8px 14px;',
-      '  border-top:1px solid #333;flex-shrink:0;',
+      '  border-top:1px solid #da7757;flex-shrink:0;',
       '}',
       '',
       '@keyframes pb-pulse {',
@@ -1412,7 +1412,7 @@
 
     // Auto-commit checkbox
     var commitRow = document.createElement('div');
-    commitRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:8px;border-top:1px solid #333;';
+    commitRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:8px;border-top:1px solid #da7757;';
     var commitCheckbox = document.createElement('input');
     commitCheckbox.type = 'checkbox';
     commitCheckbox.id = 'pb-auto-commit';
