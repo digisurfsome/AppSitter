@@ -1205,16 +1205,17 @@
     msg.style.cssText = 'color:#da7757;font-size:54px;font-weight:bold;margin-bottom:16px;text-align:center;font-family:system-ui,sans-serif;';
     msg.textContent = message || 'Refreshing page...';
 
-    var countdown = document.createElement('div');
-    countdown.style.cssText = 'color:#fff;font-size:48px;font-weight:bold;font-family:system-ui,sans-serif;';
-    countdown.textContent = seconds;
-
     var sub = document.createElement('div');
-    sub.style.cssText = 'color:#999;font-size:14px;margin-top:12px;font-family:system-ui,sans-serif;';
-    sub.textContent = 'The page timer will refresh the page when your Github repository has been created';
+    sub.style.cssText = 'color:#999;font-size:24px;margin-top:16px;font-family:system-ui,sans-serif;text-align:center;';
+    var countdownSpan = document.createElement('span');
+    countdownSpan.style.cssText = 'color:#fff;font-weight:bold;';
+    countdownSpan.textContent = seconds;
+    sub.textContent = '';
+    sub.appendChild(document.createTextNode('The page will refresh in '));
+    sub.appendChild(countdownSpan);
+    sub.appendChild(document.createTextNode('s when your Github repository has been created'));
 
     overlay.appendChild(msg);
-    overlay.appendChild(countdown);
     overlay.appendChild(sub);
     document.body.appendChild(overlay);
 
@@ -1223,10 +1224,10 @@
       remaining--;
       if (remaining <= 0) {
         clearInterval(timer);
-        countdown.textContent = '0';
+        countdownSpan.textContent = '0';
         location.reload();
       } else {
-        countdown.textContent = remaining;
+        countdownSpan.textContent = remaining;
       }
     }, 1000);
   }
