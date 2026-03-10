@@ -570,6 +570,114 @@
   // REPO DROPDOWN SELECTION (Claude Code Web)
   // ============================================================
 
+  function startNewSession(callback) {
+    // Click the "+" button or "New chat" to navigate to the new session page
+    // where the "Ask Claude to write code..." input lives
+    addLog('Navigating to new session...');
+    var urlBefore = window.location.href;
+
+    // Look for "+" button in sidebar area (near repo tabs, top-left)
+    var plusBtn = null;
+    var candidates = document.querySelectorAll('button, a, [role="button"]');
+    for (var i = 0; i < candidates.length; i++) {
+      var el = candidates[i];
+      if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
+      var rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+
+      var text = (el.textContent || '').trim();
+      var label = (el.getAttribute('aria-label') || '').toLowerCase();
+      var title = (el.getAttribute('title') || '').toLowerCase();
+
+      // Match "+" button, "New chat", "New conversation"
+      if (text === '+' ||
+          label.indexOf('new chat') !== -1 || label.indexOf('new conversation') !== -1 ||
+          label.indexOf('new session') !== -1 ||
+          title.indexOf('new chat') !== -1 || title.indexOf('new conversation') !== -1) {
+        // Prefer buttons in the sidebar/top area
+        if (rect.left < 350 && rect.top < 250) {
+          plusBtn = el;
+          addLog('Found new session button: "' + (text || label || title).substring(0, 20) + '" at y=' + Math.round(rect.top));
+          break;
+        }
+      }
+    }
+
+    // Broader fallback: look for small "+" buttons in the sidebar
+    if (!plusBtn) {
+      for (var j = 0; j < candidates.length; j++) {
+        var btn = candidates[j];
+        if (btn.closest('#pb-panel') || btn.closest('#pb-toggle')) continue;
+        var brect = btn.getBoundingClientRect();
+        if (brect.left < 300 && brect.top < 200 && brect.width > 0 && brect.width < 50 && brect.height < 50) {
+          var btnText = (btn.textContent || '').trim();
+          if (btnText === '+') {
+            plusBtn = btn;
+            addLog('Found "+" button at y=' + Math.round(brect.top));
+            break;
+          }
+          // Icon-only button with SVG (common for "+" buttons)
+          var svg = btn.querySelector('svg');
+          if (svg && !btnText && brect.width < 45) {
+            // Check if this looks like a "new" button (small, in sidebar area)
+            plusBtn = btn;
+            addLog('Found icon button in sidebar at y=' + Math.round(brect.top) + ' (likely "+")');
+            break;
+          }
+        }
+      }
+    }
+
+    if (!plusBtn) {
+      addLog('WARNING: Could not find "+" / New Chat button. Proceeding without new session.');
+      if (callback) callback();
+      return;
+    }
+
+    plusBtn.click();
+    addLog('Clicked new session button.');
+
+    // Poll for the new session page to load (URL changes, "Ask Claude" input appears)
+    var pollCount = 0;
+    var POLL_MAX = 20;
+    var POLL_INTERVAL = 500;
+
+    function waitForNewPage() {
+      pollCount++;
+      // Check if the "Ask Claude" input exists now
+      var editors = document.querySelectorAll(
+        '.ProseMirror[contenteditable="true"], div[data-placeholder][contenteditable="true"], div[contenteditable="true"]'
+      );
+      for (var k = 0; k < editors.length; k++) {
+        var ed = editors[k];
+        if (ed.closest('#pb-panel')) continue;
+        var ph = (ed.getAttribute('data-placeholder') || '').toLowerCase();
+        var edRect = ed.getBoundingClientRect();
+        if ((ph.indexOf('ask') !== -1 || ph.indexOf('write') !== -1 || ph.indexOf('claude') !== -1) &&
+            edRect.width > 0) {
+          addLog('New session page loaded. "Ask Claude" input found.');
+          setTimeout(function () { if (callback) callback(); }, 1000);
+          return;
+        }
+        // Also accept: editor near top of page after URL changed
+        if (edRect.top < 200 && edRect.width > 0 && window.location.href !== urlBefore) {
+          addLog('New session page loaded. Editor at top found.');
+          setTimeout(function () { if (callback) callback(); }, 1000);
+          return;
+        }
+      }
+
+      if (pollCount >= POLL_MAX) {
+        addLog('WARNING: Timed out waiting for new session page. Proceeding anyway.');
+        if (callback) callback();
+        return;
+      }
+      setTimeout(waitForNewPage, POLL_INTERVAL);
+    }
+
+    setTimeout(waitForNewPage, 500);
+  }
+
   function selectRepoInDropdown(repoName, callback) {
     if (!repoName) {
       addLog('No repo name set. Skipping repo selection.');
@@ -582,7 +690,9 @@
       return;
     }
 
-    addLog('Selecting repo: ' + repoName + '...');
+    // First navigate to a new session, THEN select the repo
+    startNewSession(function () {
+      addLog('Selecting repo: ' + repoName + '...');
     // Step 1: Find the repo selector button in the top-left area
     // Claude Code Web shows the repo name in a clickable button near the top-left
     var repoBtn = null;
