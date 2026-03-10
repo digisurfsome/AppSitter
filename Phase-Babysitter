@@ -1117,38 +1117,51 @@
         }
 
         if (matchEl) {
-          // PRIMARY: Try React internal handler invocation on matched element + ancestors.
-          // This bypasses the DOM event system entirely and calls React's handlers directly.
-          addLog('Trying reactClick on matched element...');
-          var handled = reactClick(matchEl);
-
-          // Also try coordinate-based approach as backup
-          var cx = matchRect.left + matchRect.width / 2;
-          var cy = matchRect.top + matchRect.height / 2;
-          addLog('Also trying coordinate click at (' + Math.round(cx) + ',' + Math.round(cy) + ')...');
-          clickAtCoordinates(cx, cy);
-
-          // Also scan ALL elements at the match location and try reactClick on each
-          // (the visual element might differ from the one with the handler)
-          var pointEl = document.elementFromPoint(cx, cy);
-          if (pointEl && pointEl !== matchEl) {
-            addLog('elementFromPoint differs from match! Trying reactClick on pointEl too...');
-            reactClick(pointEl);
-          }
-
-          // Debug: dump React props found on elements in the area
-          var scanEl = matchEl;
-          for (var sd = 0; sd < 5 && scanEl && scanEl !== document.body; sd++) {
-            var rp = getReactProps(scanEl);
-            if (rp) {
-              var propNames = Object.keys(rp).filter(function(k) {
-                return typeof rp[k] === 'function' || k.indexOf('on') === 0;
-              });
-              addLog('DEBUG ReactProps depth=' + sd + ' tag=' + scanEl.tagName +
-                     ' class="' + (scanEl.className || '').substring(0, 20) + '"' +
-                     ' handlers=[' + propNames.join(',') + ']');
+          try {
+            // DIAGNOSTIC: What special properties exist on this element and its ancestors?
+            var scanEl2 = matchEl;
+            for (var sd2 = 0; sd2 < 6 && scanEl2 && scanEl2 !== document.body; sd2++) {
+              try {
+                var specialKeys = [];
+                var allKeys = Object.keys(scanEl2);
+                for (var ki = 0; ki < allKeys.length; ki++) {
+                  if (allKeys[ki].indexOf('__') === 0 || allKeys[ki].indexOf('$') !== -1) {
+                    specialKeys.push(allKeys[ki].substring(0, 30));
+                  }
+                }
+                var rp2 = getReactProps(scanEl2);
+                var rpKeys = rp2 ? Object.keys(rp2).join(',') : 'NO_PROPS';
+                addLog('DIAG d=' + sd2 + ' ' + scanEl2.tagName +
+                       '.' + (scanEl2.className || '').substring(0, 20) +
+                       ' special=[' + specialKeys.join(',') + ']' +
+                       ' reactProps=[' + rpKeys.substring(0, 80) + ']');
+              } catch (de) {
+                addLog('DIAG d=' + sd2 + ' ERROR: ' + de.message);
+              }
+              scanEl2 = scanEl2.parentElement;
             }
-            scanEl = scanEl.parentElement;
+
+            // Try React internal handler invocation
+            addLog('Trying reactClick on matched element...');
+            var handled = reactClick(matchEl);
+            if (!handled) {
+              addLog('No React handlers found on matchEl or ancestors');
+            }
+
+            // Also try coordinate-based approach
+            var cx = matchRect.left + matchRect.width / 2;
+            var cy = matchRect.top + matchRect.height / 2;
+            addLog('Also trying coordinate click at (' + Math.round(cx) + ',' + Math.round(cy) + ')...');
+            clickAtCoordinates(cx, cy);
+
+            // Also try reactClick on the elementFromPoint result
+            var pointEl = document.elementFromPoint(cx, cy);
+            if (pointEl && pointEl !== matchEl) {
+              addLog('elementFromPoint differs! tag=' + pointEl.tagName + ' Trying reactClick...');
+              reactClick(pointEl);
+            }
+          } catch (outerErr) {
+            addLog('ERROR in click logic: ' + outerErr.message);
           }
         }
 
