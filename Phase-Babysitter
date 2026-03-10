@@ -570,112 +570,114 @@
   // REPO DROPDOWN SELECTION (Claude Code Web)
   // ============================================================
 
-  function startNewSession(callback) {
-    // Click the "+" button or "New chat" to navigate to the new session page
-    // where the "Ask Claude to write code..." input lives
-    addLog('Navigating to new session...');
-    var urlBefore = window.location.href;
+  function activateNewSessionInput(callback) {
+    // The "Ask Claude to write code..." input is always in the top-left sidebar
+    // but it may not be an active contenteditable until clicked/focused.
+    // We need to find it and click it to activate it.
+    addLog('Activating "Ask Claude" input...');
 
-    // Look for "+" button in sidebar area (near repo tabs, top-left)
-    var plusBtn = null;
-    var candidates = document.querySelectorAll('button, a, [role="button"]');
-    for (var i = 0; i < candidates.length; i++) {
-      var el = candidates[i];
+    // Look for the sidebar input area — it's in the top-left (x < 300, y < 150)
+    // Could be a div, contenteditable, textarea, or just a clickable placeholder
+    var sidebarArea = null;
+
+    // Strategy 1: Find any element with "Ask Claude" or "write code" text/placeholder
+    var allEls = document.querySelectorAll('*');
+    for (var i = 0; i < allEls.length; i++) {
+      var el = allEls[i];
       if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
       var rect = el.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) continue;
+      if (rect.left > 350 || rect.top > 200) continue; // sidebar only
 
-      var text = (el.textContent || '').trim();
-      var label = (el.getAttribute('aria-label') || '').toLowerCase();
-      var title = (el.getAttribute('title') || '').toLowerCase();
+      var ph = (el.getAttribute('data-placeholder') || '').toLowerCase();
+      var ph2 = (el.getAttribute('placeholder') || '').toLowerCase();
+      var ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
 
-      // Match "+" button, "New chat", "New conversation"
-      if (text === '+' ||
-          label.indexOf('new chat') !== -1 || label.indexOf('new conversation') !== -1 ||
-          label.indexOf('new session') !== -1 ||
-          title.indexOf('new chat') !== -1 || title.indexOf('new conversation') !== -1) {
-        // Prefer buttons in the sidebar/top area
-        if (rect.left < 350 && rect.top < 250) {
-          plusBtn = el;
-          addLog('Found new session button: "' + (text || label || title).substring(0, 20) + '" at y=' + Math.round(rect.top));
+      if (ph.indexOf('ask') !== -1 || ph.indexOf('write code') !== -1 || ph.indexOf('claude') !== -1 ||
+          ph2.indexOf('ask') !== -1 || ph2.indexOf('write code') !== -1 || ph2.indexOf('claude') !== -1 ||
+          ariaLabel.indexOf('ask') !== -1 || ariaLabel.indexOf('write code') !== -1) {
+        sidebarArea = el;
+        addLog('Found "Ask Claude" element by placeholder/aria: tag=' + el.tagName + ' y=' + Math.round(rect.top));
+        break;
+      }
+    }
+
+    // Strategy 2: Find contenteditable or tiptap in the sidebar area
+    if (!sidebarArea) {
+      var editors = document.querySelectorAll(
+        '.ProseMirror, .tiptap, [contenteditable="true"], textarea, input[type="text"]'
+      );
+      for (var j = 0; j < editors.length; j++) {
+        var ed = editors[j];
+        if (ed.closest('#pb-panel') || ed.closest('#pb-toggle')) continue;
+        var edRect = ed.getBoundingClientRect();
+        // Must be in the sidebar area (left side, upper portion)
+        if (edRect.left < 300 && edRect.top < 200 && edRect.width > 50 && edRect.height > 10) {
+          sidebarArea = ed;
+          addLog('Found sidebar editor: tag=' + ed.tagName + ' class="' + (ed.className || '').substring(0, 30) + '" y=' + Math.round(edRect.top));
           break;
         }
       }
     }
 
-    // Broader fallback: look for small "+" buttons in the sidebar
-    if (!plusBtn) {
-      for (var j = 0; j < candidates.length; j++) {
-        var btn = candidates[j];
-        if (btn.closest('#pb-panel') || btn.closest('#pb-toggle')) continue;
-        var brect = btn.getBoundingClientRect();
-        if (brect.left < 300 && brect.top < 200 && brect.width > 0 && brect.width < 50 && brect.height < 50) {
-          var btnText = (btn.textContent || '').trim();
-          if (btnText === '+') {
-            plusBtn = btn;
-            addLog('Found "+" button at y=' + Math.round(brect.top));
-            break;
-          }
-          // Icon-only button with SVG (common for "+" buttons)
-          var svg = btn.querySelector('svg');
-          if (svg && !btnText && brect.width < 45) {
-            // Check if this looks like a "new" button (small, in sidebar area)
-            plusBtn = btn;
-            addLog('Found icon button in sidebar at y=' + Math.round(brect.top) + ' (likely "+")');
+    // Strategy 3: Look for a clickable container in the top-left that looks like an input
+    if (!sidebarArea) {
+      var containers = document.querySelectorAll('div, section, form');
+      for (var k = 0; k < containers.length; k++) {
+        var c = containers[k];
+        if (c.closest('#pb-panel') || c.closest('#pb-toggle')) continue;
+        var cRect = c.getBoundingClientRect();
+        // Looking for a box-like element in the sidebar (width 150-350, height 30-150)
+        if (cRect.left < 300 && cRect.top < 150 && cRect.width > 150 && cRect.width < 350 &&
+            cRect.height > 30 && cRect.height < 150) {
+          // Check if it contains an input-like child or has cursor:text style
+          var hasInput = c.querySelector('[contenteditable], textarea, input, .ProseMirror, .tiptap');
+          if (hasInput && !hasInput.closest('#pb-panel')) {
+            sidebarArea = hasInput;
+            addLog('Found sidebar input container: tag=' + hasInput.tagName + ' y=' + Math.round(cRect.top));
             break;
           }
         }
       }
     }
 
-    if (!plusBtn) {
-      addLog('WARNING: Could not find "+" / New Chat button. Proceeding without new session.');
+    if (!sidebarArea) {
+      addLog('WARNING: Could not find "Ask Claude" input area. Will use Reply box as fallback.');
       if (callback) callback();
       return;
     }
 
-    plusBtn.click();
-    addLog('Clicked new session button.');
+    // Click it to activate/focus
+    sidebarArea.click();
+    sidebarArea.focus();
+    addLog('Clicked sidebar input to activate.');
 
-    // Poll for the new session page to load (URL changes, "Ask Claude" input appears)
+    // Wait for it to become a proper contenteditable
     var pollCount = 0;
-    var POLL_MAX = 20;
-    var POLL_INTERVAL = 500;
-
-    function waitForNewPage() {
+    function waitForActive() {
       pollCount++;
-      // Check if the "Ask Claude" input exists now
+      // Check if there's now an active contenteditable in the sidebar area
       var editors = document.querySelectorAll(
-        '.ProseMirror[contenteditable="true"], div[data-placeholder][contenteditable="true"], div[contenteditable="true"]'
+        '.ProseMirror[contenteditable="true"], .tiptap[contenteditable="true"], div[contenteditable="true"]'
       );
-      for (var k = 0; k < editors.length; k++) {
-        var ed = editors[k];
+      for (var m = 0; m < editors.length; m++) {
+        var ed = editors[m];
         if (ed.closest('#pb-panel')) continue;
-        var ph = (ed.getAttribute('data-placeholder') || '').toLowerCase();
         var edRect = ed.getBoundingClientRect();
-        if ((ph.indexOf('ask') !== -1 || ph.indexOf('write') !== -1 || ph.indexOf('claude') !== -1) &&
-            edRect.width > 0) {
-          addLog('New session page loaded. "Ask Claude" input found.');
-          setTimeout(function () { if (callback) callback(); }, 1000);
-          return;
-        }
-        // Also accept: editor near top of page after URL changed
-        if (edRect.top < 200 && edRect.width > 0 && window.location.href !== urlBefore) {
-          addLog('New session page loaded. Editor at top found.');
-          setTimeout(function () { if (callback) callback(); }, 1000);
+        if (edRect.left < 350 && edRect.top < 200 && edRect.width > 50) {
+          addLog('"Ask Claude" input is now active at y=' + Math.round(edRect.top));
+          setTimeout(function () { if (callback) callback(); }, 500);
           return;
         }
       }
-
-      if (pollCount >= POLL_MAX) {
-        addLog('WARNING: Timed out waiting for new session page. Proceeding anyway.');
+      if (pollCount >= 10) {
+        addLog('WARNING: "Ask Claude" input did not activate. Proceeding anyway.');
         if (callback) callback();
         return;
       }
-      setTimeout(waitForNewPage, POLL_INTERVAL);
+      setTimeout(waitForActive, 300);
     }
-
-    setTimeout(waitForNewPage, 500);
+    setTimeout(waitForActive, 300);
   }
 
   function selectRepoInDropdown(repoName, callback) {
@@ -690,9 +692,7 @@
       return;
     }
 
-    // First navigate to a new session, THEN select the repo
-    startNewSession(function () {
-      addLog('Selecting repo: ' + repoName + '...');
+    addLog('Selecting repo: ' + repoName + '...');
     // Step 1: Find the repo selector button in the top-left area
     // Claude Code Web shows the repo name in a clickable button near the top-left
     var repoBtn = null;
@@ -1089,9 +1089,14 @@
     }
 
     if (shouldSelectRepo) {
-      selectRepoInDropdown(repoName, function () {
-        if (runnerState !== 'running') return;
-        injectAndSend();
+      // Step 1: Activate the sidebar "Ask Claude" input (click it to get cursor)
+      // Step 2: Select the repo in the dropdown
+      // Step 3: Inject text into the now-active sidebar input
+      activateNewSessionInput(function () {
+        selectRepoInDropdown(repoName, function () {
+          if (runnerState !== 'running') return;
+          injectAndSend();
+        });
       });
     } else {
       injectAndSend();
