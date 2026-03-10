@@ -1388,7 +1388,8 @@
     // Step 1: Auto-select repo in dropdown (only on first phase to start a new session)
     // Subsequent phases continue in the same conversation
     var repoName = getRepoName();
-    var shouldSelectRepo = repoName && SITE === 'claude' && currentPhaseIndex === 0;
+    var skipRepoSelect = localStorage.getItem(STORAGE_PREFIX + 'skipRepoSelect') === 'true';
+    var shouldSelectRepo = repoName && SITE === 'claude' && currentPhaseIndex === 0 && !skipRepoSelect;
 
     function injectAndSend(retryCount) {
       retryCount = retryCount || 0;
@@ -2103,6 +2104,29 @@
     buildNameHint.className = 'pb-hint';
     buildNameHint.textContent = 'Titles the first phase message. Claude Code Web auto-names the conversation from it.';
     repoSection.appendChild(buildNameHint);
+
+    // Skip repo selection checkbox
+    var skipRepoRow = document.createElement('div');
+    skipRepoRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:8px;border-top:1px solid #da7757;';
+    var skipRepoCheckbox = document.createElement('input');
+    skipRepoCheckbox.type = 'checkbox';
+    skipRepoCheckbox.id = 'pb-skip-repo';
+    skipRepoCheckbox.checked = localStorage.getItem(STORAGE_PREFIX + 'skipRepoSelect') === 'true';
+    skipRepoCheckbox.style.cssText = 'accent-color:#da7757;width:14px;height:14px;cursor:pointer;';
+    var skipRepoLabel = document.createElement('label');
+    skipRepoLabel.htmlFor = 'pb-skip-repo';
+    skipRepoLabel.style.cssText = 'color:#e0e0e0;font-size:11px;cursor:pointer;font-weight:600;';
+    skipRepoLabel.textContent = 'Skip repo selection (I\'ll pick the repo myself)';
+    skipRepoRow.appendChild(skipRepoCheckbox);
+    skipRepoRow.appendChild(skipRepoLabel);
+    repoSection.appendChild(skipRepoRow);
+    var skipRepoHint = document.createElement('div');
+    skipRepoHint.className = 'pb-hint';
+    skipRepoHint.textContent = 'Check this to start Phase 1 yourself. Select the repo, then hit Start — the tool handles phases 2+ automatically.';
+    repoSection.appendChild(skipRepoHint);
+    skipRepoCheckbox.addEventListener('change', function () {
+      localStorage.setItem(STORAGE_PREFIX + 'skipRepoSelect', skipRepoCheckbox.checked ? 'true' : 'false');
+    });
 
     // Auto-commit checkbox
     var commitRow = document.createElement('div');
