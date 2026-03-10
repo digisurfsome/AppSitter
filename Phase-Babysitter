@@ -101,25 +101,66 @@
   // CHAT INPUT DETECTION & INJECTION
   // ============================================================
 
-  function getEditor() {
+  function getEditor(preferNewSession) {
     var el;
-    el = document.querySelector('.ProseMirror[contenteditable="true"]');
-    if (el) return { el: el, type: 'prosemirror' };
-    el = document.querySelector('div[data-placeholder][contenteditable="true"]');
-    if (el) return { el: el, type: 'prosemirror' };
-    el = document.querySelector('#prompt-textarea');
-    if (el) return { el: el, type: 'prosemirror' };
-    el = document.querySelector('.ql-editor[contenteditable="true"]');
-    if (el) return { el: el, type: 'prosemirror' };
-    el = document.querySelector('div[contenteditable="true"]');
-    if (el) return { el: el, type: 'prosemirror' };
-    el = document.querySelector('textarea');
-    if (el) return { el: el, type: 'textarea' };
+    var selectors = [
+      { sel: '.ProseMirror[contenteditable="true"]', type: 'prosemirror' },
+      { sel: 'div[data-placeholder][contenteditable="true"]', type: 'prosemirror' },
+      { sel: '#prompt-textarea', type: 'prosemirror' },
+      { sel: '.ql-editor[contenteditable="true"]', type: 'prosemirror' },
+      { sel: 'div[contenteditable="true"]', type: 'prosemirror' },
+      { sel: 'textarea', type: 'textarea' }
+    ];
+
+    // If we want the new-session "Ask Claude to write code..." input,
+    // look for it specifically first by checking placeholder text
+    if (preferNewSession) {
+      var allEditable = document.querySelectorAll(
+        '.ProseMirror[contenteditable="true"], div[data-placeholder][contenteditable="true"], div[contenteditable="true"]'
+      );
+      for (var k = 0; k < allEditable.length; k++) {
+        el = allEditable[k];
+        if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
+        var rect = el.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        var ph = (el.getAttribute('data-placeholder') || '').toLowerCase();
+        // Match the "Ask Claude to write code..." placeholder
+        if (ph.indexOf('ask') !== -1 || ph.indexOf('write code') !== -1 || ph.indexOf('claude') !== -1) {
+          addLog('Found new-session input: placeholder="' + ph.substring(0, 50) + '"');
+          return { el: el, type: 'prosemirror' };
+        }
+      }
+      // Also check: the new-session input is typically near the TOP of the page
+      for (var m = 0; m < allEditable.length; m++) {
+        el = allEditable[m];
+        if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
+        var mRect = el.getBoundingClientRect();
+        if (mRect.width > 0 && mRect.height > 0 && mRect.top < 200) {
+          addLog('Found top-area editor at y=' + Math.round(mRect.top));
+          return { el: el, type: 'prosemirror' };
+        }
+      }
+      addLog('WARNING: Could not find new-session editor. Falling back to any editor.');
+    }
+
+    for (var i = 0; i < selectors.length; i++) {
+      var candidates = document.querySelectorAll(selectors[i].sel);
+      for (var j = 0; j < candidates.length; j++) {
+        el = candidates[j];
+        // Skip elements inside our own panel
+        if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
+        // Must be visible
+        var rect2 = el.getBoundingClientRect();
+        if (rect2.width > 0 && rect2.height > 0) {
+          return { el: el, type: selectors[i].type };
+        }
+      }
+    }
     return null;
   }
 
-  function injectText(text) {
-    var editor = getEditor();
+  function injectText(text, preferNewSession) {
+    var editor = getEditor(preferNewSession);
     if (!editor) return false;
     var el = editor.el;
     var type = editor.type;
@@ -216,26 +257,65 @@
     return !!findButtonFromMap(STOP_SELECTORS);
   }
 
-  function attemptSend(retries, callback) {
-    var btn = findButtonFromMap(SEND_SELECTORS);
+  function attemptSend(retries, callback, preferNewSession) {
+    var btn = null;
+
+    // If targeting the new-session "Ask Claude" input, find the send button near it
+    if (preferNewSession) {
+      var selectors = SEND_SELECTORS[SITE] || [];
+      for (var s = 0; s < selectors.length; s++) {
+        var candidates = document.querySelectorAll(selectors[s]);
+        for (var c = 0; c < candidates.length; c++) {
+          var r = candidates[c].getBoundingClientRect();
+          // The "Ask Claude" send button is near the top of the page
+          if (r.top < 200 && r.width > 0 && !candidates[c].disabled) {
+            btn = candidates[c];
+            break;
+          }
+        }
+        if (btn) break;
+      }
+      // Also look for a submit button in the same form/container as the editor
+      if (!btn) {
+        var ed = getEditor(true);
+        if (ed) {
+          var parent = ed.el.closest('form') || ed.el.parentElement;
+          while (parent && parent !== document.body) {
+            var formBtn = parent.querySelector('button[type="submit"], button[aria-label*="Send" i]');
+            if (formBtn && !formBtn.disabled && !formBtn.closest('#pb-panel')) {
+              btn = formBtn;
+              break;
+            }
+            parent = parent.parentElement;
+          }
+        }
+      }
+    }
+
+    if (!btn) {
+      btn = findButtonFromMap(SEND_SELECTORS);
+    }
+
     if (btn && !btn.disabled) {
       btn.click();
+      addLog('Clicked send button' + (preferNewSession ? ' (new-session)' : '') + '.');
       if (callback) callback(true);
       return;
     }
-    // Fallback: Enter key
-    var editor = getEditor();
+    // Fallback: Enter key on the correct editor
+    var editor = getEditor(preferNewSession);
     if (editor) {
       editor.el.dispatchEvent(new KeyboardEvent('keydown', {
         key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
         bubbles: true, cancelable: true
       }));
+      addLog('Pressed Enter as fallback send.');
       if (callback) callback(true);
       return;
     }
     if (retries > 0) {
       setTimeout(function () {
-        attemptSend(retries - 1, callback);
+        attemptSend(retries - 1, callback, preferNewSession);
       }, SEND_RETRY_DELAY);
     } else {
       if (callback) callback(false);
@@ -503,7 +583,6 @@
     }
 
     addLog('Selecting repo: ' + repoName + '...');
-
     // Step 1: Find the repo selector button in the top-left area
     // Claude Code Web shows the repo name in a clickable button near the top-left
     var repoBtn = null;
@@ -543,7 +622,7 @@
     }
 
     if (!repoBtn) {
-      addLog('WARNING: Could not find repo selector button. Skipping.');
+      addLog('WARNING: Could not find repo selector button. Skipping repo selection.');
       if (callback) callback();
       return;
     }
@@ -654,11 +733,19 @@
         if (!found) {
           addLog('WARNING: Could not find "' + repoName + '" in dropdown. Closing.');
           document.body.click();
+          setTimeout(function () {
+            if (callback) callback();
+          }, REPO_CLICK_DELAY);
+          return;
         }
 
+        // After selecting repo, wait briefly for UI to settle, then proceed
+        // The repo selection just changes context — we're already in the new session
+        addLog('Repo selected. Waiting for UI to settle...');
         setTimeout(function () {
+          addLog('Ready for injection.');
           if (callback) callback();
-        }, REPO_CLICK_DELAY);
+        }, 2000);
       }, REPO_SEARCH_DELAY);
     }, REPO_SELECT_TIMEOUT);
   }
@@ -669,109 +756,99 @@
 
   function renameConversation(name) {
     if (!name || SITE !== 'claude') return;
-    addLog('Attempting to rename conversation: ' + name + '...');
+    addLog('Renaming conversation to: ' + name);
 
-    // Step 1: Find the conversation title/dropdown button at top-center
-    var titleBtn = null;
-    var selectors = [
-      '[class*="conversation"] button',
-      'header [class*="title"]',
-      'button[class*="title"]'
-    ];
-    for (var s = 0; s < selectors.length; s++) {
-      titleBtn = document.querySelector(selectors[s]);
-      if (titleBtn && !titleBtn.closest('#pb-panel')) break;
-      titleBtn = null;
-    }
+    // Simple approach: just click the title text directly — it becomes editable inline
+    // No need for dropdown menu → Rename button flow
 
-    // Fallback: look for a clickable element at top-center with a dropdown arrow
-    if (!titleBtn) {
-      var candidates = document.querySelectorAll('button, [role="button"], span[class*="title"]');
-      for (var i = 0; i < candidates.length; i++) {
-        var el = candidates[i];
-        var rect = el.getBoundingClientRect();
-        // Top center area
-        if (rect.top < 60 && rect.left > 200 && rect.right < (window.innerWidth - 200) && rect.width > 50) {
-          if (!el.closest('#pb-panel')) {
-            titleBtn = el;
-            break;
-          }
+    // Step 1: Find the conversation title text at the top-center
+    var titleEl = null;
+
+    // Look for clickable text in the top-center header area
+    var candidates = document.querySelectorAll(
+      'button, [role="button"], span, h1, h2, h3, div, a'
+    );
+    for (var i = 0; i < candidates.length; i++) {
+      var el = candidates[i];
+      if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
+      var rect = el.getBoundingClientRect();
+      // Title is at top-center of the page
+      if (rect.top < 50 && rect.left > 150 && rect.right < (window.innerWidth - 150) &&
+          rect.width > 50 && rect.height > 10 && rect.height < 60) {
+        var text = (el.textContent || '').trim();
+        // Must contain some text (the conversation title) and not be a generic button
+        if (text.length > 3 && text.length < 100 &&
+            !text.match(/^(Auto|Send|Stop|Pause|Start|Settings|Help|Search|claude)/i)) {
+          titleEl = el;
+          addLog('Found title element: "' + text.substring(0, 30) + '" tag=' + el.tagName);
+          break;
         }
       }
     }
 
-    if (!titleBtn) {
-      addLog('WARNING: Could not find conversation title button. Skipping rename.');
+    if (!titleEl) {
+      addLog('WARNING: Could not find conversation title. Skipping rename.');
       return;
     }
 
-    titleBtn.click();
-    addLog('Clicked conversation title dropdown.');
+    // Step 2: Click the title text to make it editable
+    titleEl.click();
+    addLog('Clicked title text.');
 
-    // Step 2: Wait for dropdown menu, click Rename
+    // Step 3: Wait for it to become editable, then type the new name
     setTimeout(function () {
-      var renameBtn = null;
-      var menuItems = document.querySelectorAll('[role="menuitem"], [role="option"], button, a');
-      for (var i = 0; i < menuItems.length; i++) {
-        var itemText = menuItems[i].textContent.trim().toLowerCase();
-        if (itemText === 'rename' && !menuItems[i].closest('#pb-panel')) {
-          renameBtn = menuItems[i];
+      // After clicking, the title should become an editable input or contenteditable
+      var editableInput = null;
+      var inputs = document.querySelectorAll(
+        'input[type="text"], input:not([type]), [contenteditable="true"]'
+      );
+      for (var i = 0; i < inputs.length; i++) {
+        var inp = inputs[i];
+        if (inp.closest('#pb-panel')) continue;
+        var rect = inp.getBoundingClientRect();
+        // Should be in the title area (top-center)
+        if (rect.top < 60 && rect.left > 100 && rect.width > 50) {
+          editableInput = inp;
           break;
         }
       }
 
-      if (!renameBtn) {
-        addLog('WARNING: Could not find Rename option. Closing menu.');
-        document.body.click();
+      if (!editableInput) {
+        addLog('WARNING: Title did not become editable. Skipping.');
+        document.body.click(); // close any dropdown that may have opened
         return;
       }
 
-      renameBtn.click();
-      addLog('Clicked Rename.');
+      addLog('Title is editable. Typing new name...');
+      editableInput.focus();
 
-      // Step 3: Wait for editable title field, type the name
+      if (editableInput.tagName === 'INPUT') {
+        // Select all existing text, then replace
+        editableInput.select();
+        var nativeSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, 'value'
+        ).set;
+        nativeSetter.call(editableInput, name);
+        editableInput.dispatchEvent(new Event('input', { bubbles: true }));
+        editableInput.dispatchEvent(new Event('change', { bubbles: true }));
+      } else {
+        // contenteditable: select all then replace
+        var sel = window.getSelection();
+        var range = document.createRange();
+        range.selectNodeContents(editableInput);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        document.execCommand('insertText', false, name);
+      }
+
+      // Step 4: Click outside to save
       setTimeout(function () {
-        // Look for an editable input that appeared in the title area
-        var editableInput = null;
-        var inputs = document.querySelectorAll('input[type="text"], input:not([type]), [contenteditable="true"]');
-        for (var i = 0; i < inputs.length; i++) {
-          var inp = inputs[i];
-          var rect = inp.getBoundingClientRect();
-          if (rect.top < 60 && rect.left > 100 && rect.width > 50 && !inp.closest('#pb-panel')) {
-            editableInput = inp;
-            break;
-          }
-        }
-
-        if (!editableInput) {
-          addLog('WARNING: Could not find editable title field. Skipping.');
-          return;
-        }
-
-        editableInput.focus();
-        if (editableInput.tagName === 'INPUT') {
-          var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-          nativeSetter.call(editableInput, name);
-          editableInput.dispatchEvent(new Event('input', { bubbles: true }));
-          editableInput.dispatchEvent(new Event('change', { bubbles: true }));
-        } else {
-          // contenteditable
-          var sel = window.getSelection();
-          var range = document.createRange();
-          range.selectNodeContents(editableInput);
-          sel.removeAllRanges();
-          sel.addRange(range);
-          document.execCommand('insertText', false, name);
-        }
-
-        // Click outside to save
-        setTimeout(function () {
-          editableInput.blur();
-          document.body.click();
-          addLog('Conversation renamed to: ' + name);
-        }, 300);
+        editableInput.blur();
+        var mainArea = document.querySelector('main') || document.body;
+        mainArea.click();
+        addLog('Renamed to: ' + name);
       }, 500);
-    }, 500);
+    }, 800);
   }
 
   // ============================================================
@@ -819,34 +896,67 @@
     saveState();
     refreshUI();
 
-    // Step 1: Auto-select repo in dropdown (always on when repo name is set)
+    // Step 1: Auto-select repo in dropdown (only on first phase to start a new session)
+    // Subsequent phases continue in the same conversation
     var repoName = getRepoName();
-    var shouldSelectRepo = repoName && SITE === 'claude';
+    var shouldSelectRepo = repoName && SITE === 'claude' && currentPhaseIndex === 0;
 
-    function injectAndSend() {
-      addLog('Injecting Phase ' + phase.number + '...');
+    function injectAndSend(retryCount) {
+      retryCount = retryCount || 0;
+      var MAX_INJECT_RETRIES = 5;
+      var INJECT_RETRY_DELAY = 1500;
+
+      // For the first phase, we need the "Ask Claude to write code..." input (new session)
+      // For subsequent phases, we use the regular reply input
+      var useNewSession = shouldSelectRepo;
+
+      addLog('Injecting Phase ' + phase.number + (retryCount > 0 ? ' (retry ' + retryCount + ')' : '') +
+             (useNewSession ? ' [new-session mode]' : '') + '...');
 
       var text = substituteVars(phase.content);
       text = wrapPhaseContent(text, currentPhaseIndex);
-      var injected = injectText(text);
+
+      // Log what editor we found for debugging
+      var editor = getEditor(useNewSession);
+      if (editor) {
+        var ph = editor.el.getAttribute('data-placeholder') || '';
+        var cls = editor.el.className || '';
+        var eRect = editor.el.getBoundingClientRect();
+        addLog('Found editor: placeholder="' + (ph.substring(0, 40)) + '" class="' + cls.substring(0, 30) + '" y=' + Math.round(eRect.top));
+      } else {
+        addLog('No editor found yet.');
+      }
+
+      var injected = injectText(text, useNewSession);
       if (!injected) {
-        addLog('ERROR: No chat input found. Pausing.');
+        if (retryCount < MAX_INJECT_RETRIES) {
+          addLog('No chat input found. Retrying in ' + (INJECT_RETRY_DELAY / 1000) + 's... (' + (retryCount + 1) + '/' + MAX_INJECT_RETRIES + ')');
+          setTimeout(function () {
+            if (runnerState !== 'running') return;
+            injectAndSend(retryCount + 1);
+          }, INJECT_RETRY_DELAY);
+          return;
+        }
+        addLog('ERROR: No chat input found after ' + MAX_INJECT_RETRIES + ' retries. Pausing.');
         runnerState = 'paused';
         saveState();
         refreshUI();
         return;
       }
 
-      addLog('Text injected. Attempting to send...');
+      // Verify text actually got into the editor
+      var editorAfter = getEditor(useNewSession);
+      var contentLen = editorAfter ? (editorAfter.el.textContent || '').length : 0;
+      addLog('Text injected (' + contentLen + ' chars). Sending' + (useNewSession ? ' [new-session]' : '') + '...');
 
       setTimeout(function () {
         if (runnerState !== 'running') return;
 
         attemptSend(SEND_MAX_RETRIES, function (sent) {
           if (!sent) {
-            addLog('WARNING: Could not auto-send. Please click Send manually. Babysitter will still watch for completion.');
+            addLog('WARNING: Auto-send failed. Click Send manually.');
           } else {
-            addLog('Phase ' + phase.number + ' sent. Watching for completion...');
+            addLog('Phase ' + phase.number + ' sent successfully!');
           }
 
           setTimeout(function () {
