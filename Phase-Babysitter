@@ -1213,7 +1213,7 @@
     sub.textContent = '';
     sub.appendChild(document.createTextNode('The page will refresh in '));
     sub.appendChild(countdownSpan);
-    sub.appendChild(document.createTextNode('s allowing you to finish the last few steps to set up and start the AppSitter'));
+    sub.appendChild(document.createTextNode('s allowing you to finish the last few steps setting up & starting the AppSitter'));
 
     overlay.appendChild(msg);
     overlay.appendChild(sub);
