@@ -113,8 +113,32 @@
     ];
 
     // If we want the new-session "Ask Claude to write code..." input,
-    // look for it specifically first by checking placeholder text
+    // use the stored reference from activateNewSessionInput if available
     if (preferNewSession) {
+      // First check: stored reference from activateNewSessionInput
+      if (window._pbSidebarInput) {
+        el = window._pbSidebarInput;
+        var sRect = el.getBoundingClientRect();
+        if (sRect.width > 0 && sRect.height > 0) {
+          var sType = (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') ? 'textarea' : 'prosemirror';
+          addLog('Using stored sidebar input: tag=' + el.tagName + ' y=' + Math.round(sRect.top));
+          return { el: el, type: sType };
+        }
+      }
+
+      // Fallback: search for textarea or input in sidebar area
+      var sidebarInputs = document.querySelectorAll('textarea, input[type="text"]');
+      for (var si = 0; si < sidebarInputs.length; si++) {
+        el = sidebarInputs[si];
+        if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
+        var siRect = el.getBoundingClientRect();
+        if (siRect.left < 350 && siRect.top < 200 && siRect.width > 50) {
+          addLog('Found sidebar textarea at y=' + Math.round(siRect.top));
+          return { el: el, type: 'textarea' };
+        }
+      }
+
+      // Also check contenteditables with placeholder text
       var allEditable = document.querySelectorAll(
         '.ProseMirror[contenteditable="true"], div[data-placeholder][contenteditable="true"], div[contenteditable="true"]'
       );
@@ -123,20 +147,8 @@
         if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
         var rect = el.getBoundingClientRect();
         if (rect.width === 0 || rect.height === 0) continue;
-        var ph = (el.getAttribute('data-placeholder') || '').toLowerCase();
-        // Match the "Ask Claude to write code..." placeholder
-        if (ph.indexOf('ask') !== -1 || ph.indexOf('write code') !== -1 || ph.indexOf('claude') !== -1) {
-          addLog('Found new-session input: placeholder="' + ph.substring(0, 50) + '"');
-          return { el: el, type: 'prosemirror' };
-        }
-      }
-      // Also check: the new-session input is typically near the TOP of the page
-      for (var m = 0; m < allEditable.length; m++) {
-        el = allEditable[m];
-        if (el.closest('#pb-panel') || el.closest('#pb-toggle')) continue;
-        var mRect = el.getBoundingClientRect();
-        if (mRect.width > 0 && mRect.height > 0 && mRect.top < 200) {
-          addLog('Found top-area editor at y=' + Math.round(mRect.top));
+        if (rect.left < 350 && rect.top < 200) {
+          addLog('Found top-area editor at y=' + Math.round(rect.top));
           return { el: el, type: 'prosemirror' };
         }
       }
@@ -287,6 +299,41 @@
               break;
             }
             parent = parent.parentElement;
+          }
+        }
+      }
+      // Fallback: find any button physically near the sidebar input (within ~100px)
+      // The send button on Claude is an orange circle with an arrow SVG right next to the textarea
+      if (!btn) {
+        var ed2 = getEditor(true);
+        if (ed2) {
+          var edRect = ed2.el.getBoundingClientRect();
+          var allBtns = document.querySelectorAll('button');
+          var closestBtn = null;
+          var closestDist = Infinity;
+          for (var b = 0; b < allBtns.length; b++) {
+            var ab = allBtns[b];
+            if (ab.disabled || ab.closest('#pb-panel') || ab.closest('#pb-toggle')) continue;
+            var abRect = ab.getBoundingClientRect();
+            if (abRect.width === 0 || abRect.height === 0) continue;
+            // Button must be near the editor vertically and to the right or overlapping
+            var vertDist = Math.abs((abRect.top + abRect.height / 2) - (edRect.top + edRect.height / 2));
+            var horizDist = abRect.left - (edRect.right);
+            // Within 100px vertically and 150px to the right of editor
+            if (vertDist < 100 && horizDist > -50 && horizDist < 150) {
+              var dist = Math.sqrt(vertDist * vertDist + horizDist * horizDist);
+              // Prefer buttons that contain SVG (icon buttons like send arrows)
+              var hasSvg = ab.querySelector('svg');
+              var adjustedDist = hasSvg ? dist * 0.5 : dist;
+              if (adjustedDist < closestDist) {
+                closestDist = adjustedDist;
+                closestBtn = ab;
+              }
+            }
+          }
+          if (closestBtn) {
+            btn = closestBtn;
+            addLog('Found send button near sidebar input (proximity match).');
           }
         }
       }
@@ -652,13 +699,22 @@
     sidebarArea.focus();
     addLog('Clicked sidebar input to activate.');
 
-    // Wait for it to become a proper contenteditable
+    // If it's already a textarea or contenteditable, it's already active — proceed
+    var tag = sidebarArea.tagName.toLowerCase();
+    if (tag === 'textarea' || tag === 'input' || sidebarArea.getAttribute('contenteditable') === 'true') {
+      addLog('"Ask Claude" input is active (tag=' + tag + '). Ready.');
+      // Store reference so getEditor can find it
+      window._pbSidebarInput = sidebarArea;
+      setTimeout(function () { if (callback) callback(); }, 500);
+      return;
+    }
+
+    // Otherwise wait for it to become a proper contenteditable
     var pollCount = 0;
     function waitForActive() {
       pollCount++;
-      // Check if there's now an active contenteditable in the sidebar area
       var editors = document.querySelectorAll(
-        '.ProseMirror[contenteditable="true"], .tiptap[contenteditable="true"], div[contenteditable="true"]'
+        '.ProseMirror[contenteditable="true"], .tiptap[contenteditable="true"], div[contenteditable="true"], textarea'
       );
       for (var m = 0; m < editors.length; m++) {
         var ed = editors[m];
@@ -666,6 +722,7 @@
         var edRect = ed.getBoundingClientRect();
         if (edRect.left < 350 && edRect.top < 200 && edRect.width > 50) {
           addLog('"Ask Claude" input is now active at y=' + Math.round(edRect.top));
+          window._pbSidebarInput = ed;
           setTimeout(function () { if (callback) callback(); }, 500);
           return;
         }
@@ -822,21 +879,46 @@
           if (found) break;
         }
 
-        // Broader fallback: any clickable element in dropdown area matching the name
+        // Broader fallback: any visible element in the dropdown area that contains
+        // the repo name. The Claude dropdown items may be plain divs without roles
+        // or tabindex, so we scan ALL elements below the search input.
         if (!found) {
-          var clickables = document.querySelectorAll('a, button, [role="button"], div[tabindex], li, span[tabindex]');
-          for (var j = 0; j < clickables.length; j++) {
-            var cel = clickables[j];
+          var allDropdownEls = document.querySelectorAll('a, button, [role="button"], div, li, span, p');
+          var bestMatch = null;
+          var bestLen = Infinity;
+          for (var j = 0; j < allDropdownEls.length; j++) {
+            var cel = allDropdownEls[j];
+            if (cel.closest('#pb-panel') || cel.closest('#pb-toggle')) continue;
             var crect = cel.getBoundingClientRect();
-            if (crect.left < 400 && crect.top > 40 && crect.top < 400 && crect.width > 0) {
+            // Must be in the dropdown area: left side, below the repo button, visible
+            if (crect.left < 400 && crect.top > 40 && crect.top < 500 &&
+                crect.width > 30 && crect.height > 10 && crect.height < 80) {
               var celText = cel.textContent.trim().toLowerCase();
-              if (celText.indexOf(lowerName) !== -1 && celText.length < 100 && !cel.closest('#pb-panel')) {
-                cel.click();
-                addLog('Selected repo: ' + repoName);
-                found = true;
-                break;
+              // Match: text contains repo name, is reasonably short, and prefer
+              // the most specific (shortest) match to avoid clicking a parent container
+              if (celText.indexOf(lowerName) !== -1 && celText.length < 100 && celText.length < bestLen) {
+                // Make sure this element doesn't have a child that also matches
+                // (we want the innermost/most specific element)
+                var childMatch = false;
+                var children = cel.children;
+                for (var ch = 0; ch < children.length; ch++) {
+                  var childText = children[ch].textContent.trim().toLowerCase();
+                  if (childText.indexOf(lowerName) !== -1 && childText.length < 100) {
+                    childMatch = true;
+                    break;
+                  }
+                }
+                if (!childMatch) {
+                  bestMatch = cel;
+                  bestLen = celText.length;
+                }
               }
             }
+          }
+          if (bestMatch) {
+            bestMatch.click();
+            addLog('Selected repo: ' + repoName + ' (fallback match: "' + bestMatch.textContent.trim().substring(0, 30) + '")');
+            found = true;
           }
         }
 
@@ -1102,6 +1184,51 @@
     } else {
       injectAndSend();
     }
+  }
+
+  // ============================================================
+  // REFRESH COUNTDOWN OVERLAY
+  // ============================================================
+
+  function showRefreshCountdown(seconds, message) {
+    addLog('Page refreshing in ' + seconds + 's...');
+
+    // Create fullscreen overlay
+    var overlay = document.createElement('div');
+    overlay.style.cssText = [
+      'position:fixed;top:0;left:0;width:100%;height:100%;z-index:999999;',
+      'background:rgba(0,0,0,0.85);display:flex;flex-direction:column;',
+      'align-items:center;justify-content:center;cursor:wait;'
+    ].join('');
+
+    var msg = document.createElement('div');
+    msg.style.cssText = 'color:#da7757;font-size:54px;font-weight:bold;margin-bottom:16px;text-align:center;font-family:system-ui,sans-serif;';
+    msg.textContent = message || 'Refreshing page...';
+
+    var countdown = document.createElement('div');
+    countdown.style.cssText = 'color:#fff;font-size:48px;font-weight:bold;font-family:system-ui,sans-serif;';
+    countdown.textContent = seconds;
+
+    var sub = document.createElement('div');
+    sub.style.cssText = 'color:#999;font-size:14px;margin-top:12px;font-family:system-ui,sans-serif;';
+    sub.textContent = 'Page will refresh so your new repo appears in the dropdown';
+
+    overlay.appendChild(msg);
+    overlay.appendChild(countdown);
+    overlay.appendChild(sub);
+    document.body.appendChild(overlay);
+
+    var remaining = seconds;
+    var timer = setInterval(function () {
+      remaining--;
+      if (remaining <= 0) {
+        clearInterval(timer);
+        countdown.textContent = '0';
+        location.reload();
+      } else {
+        countdown.textContent = remaining;
+      }
+    }, 1000);
   }
 
   // ============================================================
@@ -1945,11 +2072,8 @@
             addLog('Created repo: ' + ghUser + '/' + appName + ' with ' + bpLabel2);
             appNameInput.value = '';
 
-            // Refresh page after 5s so the new repo appears in Claude Code Web's dropdown
-            addLog('Page will refresh in 5s so repo appears in dropdown...');
-            setTimeout(function () {
-              location.reload();
-            }, 5000);
+            // Show countdown overlay then refresh so new repo appears in dropdown
+            showRefreshCountdown(2, 'Loading new repo: ' + appName);
           });
         } else {
           return resp.json().then(function (err) {
