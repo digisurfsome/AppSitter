@@ -32,9 +32,7 @@
     autoCommit: 'pb-auto-commit',
     zoom: 'pb-zoom',
     githubToken: 'pb-github-token',
-    githubUser: 'pb-github-user',
-    needsRefresh: 'pb-needs-refresh',
-    autoStart: 'pb-auto-start'
+    githubUser: 'pb-github-user'
   };
 
   var BOILERPLATES = {
@@ -1245,25 +1243,8 @@
       if (remaining <= 0) {
         clearInterval(timer);
         countdownSpan.textContent = '0';
-        // Nuclear hard refresh — clear all caches, unregister service workers, then reload
-        try {
-          if ('caches' in window) {
-            caches.keys().then(function (names) {
-              names.forEach(function (n) { caches.delete(n); });
-            }).catch(function () {});
-          }
-          if (navigator.serviceWorker) {
-            navigator.serviceWorker.getRegistrations().then(function (regs) {
-              regs.forEach(function (r) { r.unregister(); });
-            }).catch(function () {});
-          }
-        } catch (e) {}
-        // Navigate to Claude Code home page (not reload current conversation)
-        // so repo selection starts from a clean new-session state
-        setTimeout(function () {
-          var base = window.location.origin + '/code';
-          window.location.href = base;
-        }, 300);
+        // Navigate to /code home for a clean new-session state
+        window.location.href = window.location.origin + '/code';
       } else {
         countdownSpan.textContent = remaining;
       }
@@ -2109,9 +2090,10 @@
 
             var bpLabel2 = (bpKey !== 'none') ? bp.label + ' boilerplate' : 'no boilerplate';
             addLog('Created repo: ' + ghUser + '/' + appName + ' with ' + bpLabel2);
-            addLog('Repo ready. Paste your phases and click Start — repo will be selected automatically.');
-            localStorage.setItem(STORAGE.needsRefresh, 'true');
             appNameInput.value = '';
+
+            // Show countdown overlay then refresh so new repo appears in dropdown
+            showRefreshCountdown(6, 'Loading new repo: ' + appName);
           });
         } else {
           return resp.json().then(function (err) {
@@ -2201,33 +2183,6 @@
         currentPhaseIndex = 0;
         for (var i = 0; i < phases.length; i++) phases[i].status = 'pending';
       }
-
-      // If a repo was just created, we need to refresh so Claude Code sees it
-      if (localStorage.getItem(STORAGE.needsRefresh) === 'true') {
-        localStorage.removeItem(STORAGE.needsRefresh);
-        localStorage.setItem(STORAGE.autoStart, 'true');
-        runnerState = 'running';
-        saveState();
-        addLog('Refreshing page so Claude Code can see the new repo...');
-        // Navigate to /code home for a clean new-session state
-        try {
-          if ('caches' in window) {
-            caches.keys().then(function (names) {
-              names.forEach(function (n) { caches.delete(n); });
-            }).catch(function () {});
-          }
-          if (navigator.serviceWorker) {
-            navigator.serviceWorker.getRegistrations().then(function (regs) {
-              regs.forEach(function (r) { r.unregister(); });
-            }).catch(function () {});
-          }
-        } catch (e) {}
-        setTimeout(function () {
-          window.location.href = window.location.origin + '/code';
-        }, 300);
-        return;
-      }
-
       runnerState = 'running';
       saveState();
       refreshUI();
@@ -2466,30 +2421,6 @@
         loadState();
         injectStyles();
         buildUI();
-
-        // Auto-start after refresh (repo was just created, user already clicked Start)
-        if (localStorage.getItem(STORAGE.autoStart) === 'true') {
-          localStorage.removeItem(STORAGE.autoStart);
-          addLog('Auto-starting after refresh...');
-          // Give the page a moment to fully render before clicking Start
-          setTimeout(function () {
-            runnerState = 'running';
-            saveState();
-            refreshUI();
-            addLog('Runner started (auto).');
-
-            var buildName = getBuildName();
-            var rName = getRepoName();
-            if (buildName || rName) {
-              if (renameTimer) clearTimeout(renameTimer);
-              renameTimer = setTimeout(function () {
-                renameConversation(buildName || ('Phase Build - ' + rName));
-              }, RENAME_DELAY);
-            }
-
-            runCurrentPhase();
-          }, 3000);
-        }
       }
     }, 200);
   }
